@@ -1,0 +1,42 @@
+# =============================================================================
+# Commit: Hub + health-check scripts + web UIs + shared docs/templates only.
+# Cursor skills, agent playbooks, MCP tool descriptors, and internal notes are
+# kept locally (see patterns below). If something was committed before it was
+# ignored:  git rm -r --cached <path>
+# =============================================================================
+
+# --- Cursor / IDE / MCP (not required to run the Health Check Hub) ---
+.cursor/
+mcps/
+
+# --- Agent playbooks & internal notes (optional locally; not in public tree) ---
+AGENTS.md
+internal-process-notes.md
+
+# --- Generated assessment outputs (CLI default path; Hub uses data/ below) ---
+reports/
+
+# --- Local env files ---
+.env
+.env.local
+*.local.env
+
+# --- Optional local customer profiles with secrets ---
+customer-profile.local.yaml
+customer-profile.yaml
+customer-profile.*.local.yaml
+**/secrets/
+
+# --- Local venvs ---
+.venv*/
+venv/
+
+# --- Health Hub job output (logs, token scratch profiles; never commit) ---
+data/o11y-health-hub/
+
+# --- OS / editor noise ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/

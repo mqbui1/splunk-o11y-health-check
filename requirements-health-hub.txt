@@ -1,0 +1,2 @@
+# Local web UI to kick off health checks (Flask). Run on trusted networks only — jobs write a short-lived profile with API token.
+flask>=3.0.0

@@ -1,0 +1,8 @@
+# Optional dependencies for executive PowerPoint (.pptx) and viewer PDF export.
+# Core health-check scripts remain stdlib-only; install this set only when needed.
+#
+#   pip install -r requirements-presentation.txt
+#   playwright install chromium
+
+python-pptx>=0.6.23
+playwright>=1.40.0

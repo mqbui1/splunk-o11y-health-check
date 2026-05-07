@@ -1,0 +1,102 @@
+# Example customer profile — copy to customer-profile.yaml or customer-profile.local.yaml
+# (both are typically gitignored). Never commit real tokens.
+
+report_title: "Example Org O11y Health Check"
+company_or_purpose: "Example Org"
+scope: "full"
+
+realm: "us0"
+access_token: "REPLACE_WITH_ORG_ACCESS_TOKEN"
+# Optional: Splunk Observability UI host for Token health token-detail links (default https://app.{realm}.signalfx.com)
+# signalfx_app_base: "https://us-splunk-shw.signalfx.com"
+
+health_check_output_dir: "reports"
+health_check_license_days: "90"
+# Optional license window: single full UTC month (overrides lookback and start/end dates):
+# health_check_license_calendar_month: "2025-01"
+# Or explicit UTC day range (Health Check Hub expands start/end month pickers to these):
+# health_check_license_start_date: "2025-01-01"
+# health_check_license_end_date: "2025-03-31"
+# Optional platform engagement month-vs-month (both required together; overrides as-of and four compare dates).
+# The earlier YYYY-MM becomes Baseline and the later Comparison (order of the two keys does not matter):
+# health_check_pe_baseline_month: "2024-06"
+# health_check_pe_comparison_month: "2025-01"
+# Advanced (CLI / profile): see o11y_health_check_run.py --help.
+health_check_apm_hours: "24"
+# APM SignalFlow: max datapoints per spans.count / traces.count stream (large orgs need higher values; default 300000)
+# health_check_apm_signalflow_max_data_points: "500000"
+health_check_apm_trace_checks: "true"
+# Extra Health Endpoints matchers: comma/semicolon-separated substrings for sf_operation (merged with script baseline)
+# health_check_apm_extra_health_operation_substrings: "/organization/readyz,/custom/probe"
+health_check_skip_license: "false"
+# APM trace volume (license): integration multiplier for sf.org.apm.numSpanBytesReceived (default 1 = B/s × bucket width).
+# Use only when verified against your Chart Builder / billing pipeline (legacy setups sometimes used 60).
+# license_apm_span_bytes_rate_integral_scale: "1"
+# "true" / "false" — skip platform engagement trends (o11y_platform_engagement_trends.py)
+health_check_skip_platform_engagement: "false"
+# Platform engagement: SignalFlow window days (default 180; clamped 90–366 in runner)
+# health_check_pe_lookback_days: "180"
+# Rollup hours for sf.org gauge KPIs (default 24)
+# health_check_pe_resolution_hours: "24"
+# Rollup hours for APM instrumented-apps matrix (default 168 = weekly)
+# health_check_pe_apps_resolution_hours: "168"
+health_check_skip_im: "false"
+health_check_im_lookback: "P1D"
+health_check_im_limit: "10000"
+# Optional: cap rows in the IM metrics table (omit or empty = all rows returned up to im_limit)
+# health_check_im_top: "200"
+health_check_skip_apm: "false"
+# "true" / "false" — skip RUM SignalFlow health (o11y_rum_health_check.py)
+health_check_skip_rum: "false"
+# RUM: SignalFlow window hours (default 168 = 7d; max 720)
+# health_check_rum_lookback_hours: "168"
+# RUM: rollup resolution in minutes (default 360)
+# health_check_rum_resolution_minutes: "360"
+# RUM: max rows per volumetric table (default 200)
+# health_check_rum_max_rows: "200"
+# "true" / "false" — skip detectors (o11y_detectors_health_check.py)
+health_check_skip_detectors: "false"
+# "true" / "false" — skip dashboards (o11y_dashboards_health_check.py)
+health_check_skip_dashboards: "false"
+# "true" / "false" — skip Synthetics (o11y_synthetics_health_check.py)
+health_check_skip_synthetics: "false"
+# "true" / "false" — skip Token health (o11y_token_health_check.py)
+health_check_skip_tokens: "false"
+# "true" / "false" — skip OpenTelemetry Collectors (o11y_otel_collectors_health_check.py)
+health_check_skip_otel_collectors: "false"
+# SignalFlow lookback for OTel collector inventory (hours); default 4
+# health_check_otel_lookback_hours: "4"
+# Depreciation date = GitHub splunk-otel-collector release published_at + N days (default 730 ≈ 2 years)
+# health_check_otel_support_days: "730"
+# Skip https://api.github.com/repos/signalfx/splunk-otel-collector/releases (air-gapped / no GitHub)
+# health_check_otel_skip_github_catalog: "false"
+# Max synthetic tests to list per run; default 2000
+# health_check_max_synthetics_tests: "2000"
+# Optional: skip SignalFlow on synthetics.run.count for failing-test rows (default: query enabled)
+# health_check_skip_synthetics_failure_metrics: "false"
+# Failing tests: 7-day failure rate vs synthetics.run.count (default 168 h lookback, 30% threshold)
+# health_check_synthetics_failure_lookback_hours: "168"
+# health_check_synthetics_failure_resolution_minutes: "60"
+# health_check_synthetics_failing_rate_threshold_pct: "30"
+# Max detectors to analyze per run (API-heavy); default 400
+# health_check_detectors_max: "400"
+# Max dashboards to fetch full detail for per run; default 150
+# health_check_max_dashboards: "150"
+# Optional: skip /v2/metrictimeseries sampling for inactive-MTS (faster consolidated run)
+# health_check_skip_inactive_mts: "false"
+# health_check_inactive_mts_hours: "36"
+# health_check_inactive_mts_max_metrics: "3"
+# health_check_inactive_mts_search_limit: "3"
+# health_check_inactive_mts_max_evaluations: "6"
+health_check_json_out: "false"
+health_check_keep_intermediate_json: "false"
+# Optional presentation exports (requires requirements-presentation.txt + playwright install chromium)
+# health_check_pptx_out: "true"          # → <report_title>.pptx next to .md
+# health_check_pdf_out: "true"         # → <report_title>.pdf (HTML viewer print)
+# Splunk-branded masters (repo): splunk-ppt-template/README.md — default is **dark**; set light below or use CLI --pptx-light
+# health_check_pptx_theme: "light"
+# Optional: override the file entirely (otherwise dark / light file is chosen automatically)
+# health_check_pptx_template: "splunk-ppt-template/Splunk Template_Light_FY27_04-26.pptx"
+# health_check_pdf_viewer_dir: "web/o11y-health-report"   # relative to repo root
+# health_check_pptx_max_table_rows: "7"
+# health_check_pptx_max_exec_bullets: "14"

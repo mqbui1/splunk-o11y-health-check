@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Observability Health Check Hub</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="hub.css" />
+  </head>
+  <body>
+    <header class="hub-header">
+      <div class="hub-header__brand">
+        <span class="hub-header__mark" aria-hidden="true">Splunk</span>
+        <div>
+          <div>Observability Cloud</div>
+          <div class="hub-header__sub">Health Check Hub</div>
+        </div>
+      </div>
+      <nav class="hub-header__nav">
+        <a href="#" id="nav-home">Reports</a>
+        <a href="#" id="nav-new">New report</a>
+      </nav>
+    </header>
+
+    <main class="hub-main">
+      <div class="banner-warn" role="note">
+        <strong>Trusted use only.</strong> This tool stores your API token briefly on disk for the run.
+        Run locally or on a private network; do not expose to the internet without authentication and TLS.
+        Install <code>requirements-health-hub.txt</code>, <code>requirements-presentation.txt</code>, and
+        <code>playwright install chromium</code> for PDF/PPT output.
+      </div>
+
+      <!-- Home: job list -->
+      <section id="view-home" class="hub-hero">
+        <h1>Reports</h1>
+        <p>Start a new Splunk Observability health assessment or open a previous run.</p>
+        <p style="margin-top: 0.75rem">
+          <button type="button" class="btn btn--primary" id="btn-goto-form">New health check</button>
+        </p>
+      </section>
+
+      <section id="view-home-list" class="hub-card">
+        <h2>Recent runs</h2>
+        <div id="job-list-mount">
+          <p class="empty-state">Loading…</p>
+        </div>
+      </section>
+
+      <!-- Form -->
+      <section id="view-form" class="hidden">
+        <div class="hub-hero">
+          <h1>New health check</h1>
+          <p>
+            Configure the assessment. By default all checklist steps, product modules, and deliverables run.
+            Use <strong>Checklist scope &amp; product modules</strong> to skip shared steps or limit products for faster test runs.
+          </p>
+        </div>
+
+        <div class="hub-card hub-card--form">
+          <h2>Details</h2>
+          <form id="hc-form" class="form-grid">
+            <div class="form-basics">
+              <div class="form-field">
+                <label for="company">Company name</label>
+                <input type="text" id="company" name="company" required autocomplete="organization" placeholder="Acme Corp" />
+              </div>
+              <div class="form-field">
+                <label for="reportTitle">Report title</label>
+                <input type="text" id="reportTitle" name="reportTitle" required placeholder="Acme O11y Health Check" />
+              </div>
+              <div class="form-field form-field--full">
+                <label for="realm">Realm</label>
+                <select id="realm" name="realm">
+                  <option value="us0">us0</option>
+                  <option value="us1">us1</option>
+                  <option value="us2">us2</option>
+                  <option value="eu0">eu0</option>
+                  <option value="eu1">eu1</option>
+                  <option value="ap0">ap0</option>
+                  <option value="jp0">jp0</option>
+                  <option value="custom">Other…</option>
+                </select>
+                <input
+                  type="text"
+                  id="realmCustom"
+                  class="hidden realm-custom-input"
+                  placeholder="Realm id"
+                  aria-label="Custom realm"
+                />
+              </div>
+              <div class="form-field form-field--full">
+                <label for="token">Organization access token</label>
+                <input type="password" id="token" name="token" required autocomplete="off" placeholder="••••••••" />
+                <p class="form-hint">Same token used for API / SignalFlow. Never committed to git; kept only for the duration of the run.</p>
+              </div>
+            </div>
+
+            <div class="form-field form-field--full form-field--scope hub-date-ranges hub-license-window">
+              <label>License Utilization Window</label>
+              <div class="hub-license-window__body">
+                <label class="product-option hub-license-window__toggle">
+                  <input type="checkbox" id="includeLicense" checked />
+                  <span><strong>License Utilization</strong><small>Include license capacity in this run</small></span>
+                </label>
+                <div class="hub-license-window__pair" id="licenseUtilizationMonthRow">
+                  <div class="hub-license-window__field">
+                    <label for="licenseUtilizationStartMonth">Start date</label>
+                    <input
+                      type="month"
+                      id="licenseUtilizationStartMonth"
+                      name="licenseUtilizationStartMonth"
+                      aria-describedby="licenseUtilHint"
+                    />
+                  </div>
+                  <div class="hub-license-window__field">
+                    <label for="licenseUtilizationEndMonth">End date</label>
+                    <input
+                      type="month"
+                      id="licenseUtilizationEndMonth"
+                      name="licenseUtilizationEndMonth"
+                      aria-describedby="licenseUtilHint"
+                    />
+                  </div>
+                </div>
+                <p class="form-hint hub-license-window__hint" id="licenseUtilHint">
+                  Month and year only. Start must not be after end. Optional when using default lookback.
+                </p>
+              </div>
+            </div>
+
+            <div class="form-field form-field--full form-field--scope">
+              <label>Checklist Scope</label>
+              <p class="form-hint">
+                Platform engagement and product modules are <strong>included by default</strong>. Uncheck to omit.
+              </p>
+
+              <p class="form-hint scope-subhead">Platform engagement</p>
+              <p class="form-hint form-hint--flush">
+                We review org-level metrics (for example <code>sf.org</code> trend KPIs) to see how usage of
+                Observability Cloud has changed between the <strong>comparison month</strong> and
+                <strong>baseline month</strong> you choose below (each is one full UTC calendar month).
+              </p>
+              <div class="skip-grid" id="sharedChecklistGrid">
+                <label class="product-option"
+                  ><input type="checkbox" id="includePlatformEngagement" checked /><span
+                    ><strong>Platform engagement</strong><small>Include trend KPIs in this run</small></span
+                  ></label
+                >
+              </div>
+              <div class="hub-license-window__body hub-engagement-window" id="platformEngagementWindow">
+                <div class="hub-license-window__pair hub-engagement-window__pair">
+                  <div class="hub-license-window__field">
+                    <label for="platformEngagementComparisonMonth">Comparison month (UTC)</label>
+                    <input
+                      type="month"
+                      id="platformEngagementComparisonMonth"
+                      name="platformEngagementComparisonMonth"
+                      aria-describedby="platformEngagementMonthHint"
+                    />
+                  </div>
+                  <div class="hub-license-window__field">
+                    <label for="platformEngagementBaselineMonth">Baseline month (UTC)</label>
+                    <input
+                      type="month"
+                      id="platformEngagementBaselineMonth"
+                      name="platformEngagementBaselineMonth"
+                      aria-describedby="platformEngagementMonthHint"
+                    />
+                  </div>
+                </div>
+                <p class="form-hint hub-license-window__hint" id="platformEngagementMonthHint">
+                  Month and year only. Leave both blank for default rolling windows. When set, each KPI uses the
+                  <strong>average</strong> (mean) of rollup points within that full month.
+                </p>
+              </div>
+
+              <p class="form-hint scope-subhead">Product modules</p>
+              <label class="product-option product-option--master">
+                <input type="checkbox" id="allProducts" checked />
+                <span><strong>All product modules</strong><small>APM, IM, RUM, Synthetics, Detectors, OpenTelemetry collectors, Dashboards, Token Health</small></span>
+              </label>
+              <p class="form-hint form-hint--after-master">
+                Uncheck “All product modules” to choose individual modules, or leave every module unchecked to run
+                <strong>only</strong> the Platform engagement section above.
+              </p>
+              <div class="product-grid" id="productGrid">
+                <label class="product-option">
+                  <input type="checkbox" name="prod" value="apm" disabled />
+                  <span><strong>APM</strong></span>
+                </label>
+                <label class="product-option">
+                  <input type="checkbox" name="prod" value="im" disabled />
+                  <span><strong>IM</strong></span>
+                </label>
+                <label class="product-option">
+                  <input type="checkbox" name="prod" value="rum" disabled />
+                  <span><strong>RUM</strong></span>
+                </label>
+                <label class="product-option">
+                  <input type="checkbox" name="prod" value="synthetics" disabled />
+                  <span><strong>Synthetics</strong></span>
+                </label>
+                <label class="product-option">
+                  <input type="checkbox" id="includeDetectors" disabled />
+                  <span><strong>Detectors</strong></span>
+                </label>
+                <label class="product-option">
+                  <input type="checkbox" id="includeOtelCollectors" disabled />
+                  <span><strong>OpenTelemetry collectors</strong></span>
+                </label>
+                <label class="product-option">
+                  <input type="checkbox" id="includeDashboards" disabled />
+                  <span><strong>Dashboards</strong></span>
+                </label>
+                <label class="product-option">
+                  <input type="checkbox" id="includeTokens" disabled />
+                  <span><strong>Token Health</strong></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="form-field form-field--full form-field--scope">
+              <label>Deliverables</label>
+              <p class="form-hint">
+                The web report (markdown) is always produced. Uncheck optional artifacts to speed up local testing.
+                PowerPoint still builds from an in-memory snapshot; uncheck JSON only if you do not need a
+                <code>report.json</code> file on disk.
+              </p>
+              <div class="deliverables-grid">
+                <label class="product-option">
+                  <input type="checkbox" id="outputJson" checked />
+                  <span><strong>Combined JSON</strong><small>Structured snapshot beside the report</small></span>
+                </label>
+                <label class="product-option">
+                  <input type="checkbox" id="outputPptx" checked />
+                  <span><strong>PowerPoint</strong><small>Executive deck</small></span>
+                </label>
+                <label class="product-option">
+                  <input type="checkbox" id="outputPdf" checked />
+                  <span><strong>PDF</strong><small>Detailed export via Chromium</small></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="btn-row btn-row--form-footer">
+              <button type="button" class="btn btn--secondary" id="btn-form-cancel">Cancel</button>
+              <button type="submit" class="btn btn--primary">Review &amp; confirm</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- Confirm -->
+      <section id="view-confirm" class="hidden">
+        <div class="hub-hero">
+          <h1>Confirm</h1>
+          <p>Review your choices before starting the health check.</p>
+        </div>
+        <div class="hub-card">
+          <dl class="confirm-dl" id="confirm-dl"></dl>
+          <div class="btn-row">
+            <button type="button" class="btn btn--secondary" id="btn-confirm-back">Back</button>
+            <button type="button" class="btn btn--primary" id="btn-confirm-submit">Start health check</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Progress -->
+      <section id="view-progress" class="hidden">
+        <div class="hub-hero">
+          <h1 id="progress-page-title">Run in progress</h1>
+          <p id="progress-summary">Starting…</p>
+          <p id="progress-status-line" class="progress-status-line"></p>
+        </div>
+        <div class="hub-card progress-overview-card">
+          <div class="progress-overview-head">
+            <span class="progress-overview-label">Overall progress</span>
+            <span id="progress-percent-label" class="progress-percent-label">0%</span>
+          </div>
+          <div
+            class="progress-bar-wrap"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+            id="progress-bar-wrap"
+          >
+            <div class="progress-bar-fill" id="progress-bar-fill" style="width: 0%"></div>
+          </div>
+          <p id="progress-footnote" class="progress-footnote hidden"></p>
+        </div>
+        <div class="hub-card">
+          <div class="progress-card-head">
+            <h2>Health check steps</h2>
+            <p class="progress-card-head__sub">
+              Steps run in order. Scripts do not expose internal % complete; the timer shows how long the active step has been running.
+            </p>
+          </div>
+          <p style="margin-top: 0">
+            Job status: <span id="progress-status" class="status-pill status-pill--running">running</span>
+          </p>
+          <ol class="progress-steps" id="progress-steps" aria-label="Health check checklist"></ol>
+          <details class="log-details">
+            <summary>Technical log</summary>
+            <p class="log-details-hint">Raw runner output for troubleshooting (API errors, tracebacks, export messages).</p>
+            <div id="progress-log" class="log-panel" aria-live="polite"></div>
+          </details>
+          <div class="btn-row" id="progress-actions">
+            <a href="#" class="btn btn--primary hidden" id="btn-open-report">Open web report</a>
+            <button type="button" class="btn btn--secondary" id="btn-progress-home">Back to reports</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="hub.js"></script>
+  </body>
+</html>

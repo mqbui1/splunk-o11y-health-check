@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Observability Health Check</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="app-header__brand">
+        <span class="app-header__brand-mark" aria-hidden="true">O11y</span>
+        <span>splunk · Observability Cloud</span>
+      </div>
+      <span class="app-header__title" id="header-doc-title">Health Check Report</span>
+      <div class="app-header__actions">
+        <div class="app-header__hub hidden" id="header-hub-actions" aria-label="Hub downloads">
+          <a class="btn btn--primary" id="hub-dl-pdf" href="#" style="opacity: 0.45; pointer-events: none"
+            >Download PDF</a
+          >
+          <a class="btn" id="hub-dl-pptx" href="#" style="opacity: 0.45; pointer-events: none"
+            >Download PowerPoint</a
+          >
+          <a class="btn" id="hub-back" href="/">All reports</a>
+        </div>
+        <button type="button" class="btn" id="btn-reload" title="Load a different report">
+          Load report…
+        </button>
+      </div>
+    </header>
+
+    <div id="load-panel" class="load-panel">
+      <h2>Open a health check report</h2>
+      <p>
+        Drop your consolidated markdown here, or choose a file. By default the script writes under
+        <code>reports/</code>; this page auto-loads <code>report.md</code> in this folder (the bundled file
+        is a demo sample). Use
+        <code>--out web/o11y-health-report/report.md</code> when generating, or use a
+        <code>?report=</code> URL (see hint below — paths must be reachable from the same HTTP origin).
+      </p>
+      <p id="load-panel-fetch-error" class="load-panel__error" role="alert" hidden></p>
+      <label class="drop-zone" id="drop-zone" tabindex="0">
+        <input class="file-input" type="file" id="file-input" accept=".md,text/markdown,text/plain" />
+        <strong>Choose file</strong> or drag <code>.md</code> here
+      </label>
+      <p class="hint">
+        <strong>Viewer-only server</strong> (serves this folder):
+        <code>python3 -m http.server 8765 --directory web/o11y-health-report</code>
+        — use bundled <code>report.md</code>, <code>--out web/o11y-health-report/report.md</code>, or <strong>Choose file</strong>.
+        To load from <code>reports/&lt;file&gt;.md</code> via URL, run the server from the <strong>repo root</strong>:
+        <code>python3 -m http.server 8765</code> and open
+        <code>http://localhost:8765/web/o11y-health-report/?report=/reports/Your%20Report.md</code>.
+        <strong>Health Check Hub</strong> (<code>o11y_health_hub_server.py</code>) opens reports with <code>?report=/api/jobs/…/markdown</code> automatically.
+      </p>
+    </div>
+
+    <div id="app-content" class="app-shell" style="display: none">
+      <aside class="sidebar" aria-label="Report sections">
+        <div class="sidebar__label">Report</div>
+        <ul class="nav-section" id="nav-sections"></ul>
+      </aside>
+
+      <main class="main">
+        <div class="hero">
+          <h1 class="hero__title" id="hero-title">Health Check</h1>
+          <p class="hero__subtitle" id="hero-subtitle"></p>
+          <div class="summary-grid" id="summary-grid"></div>
+        </div>
+
+        <div id="intro-block" class="section-card" style="display: none"></div>
+
+        <div id="sections-container"></div>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
