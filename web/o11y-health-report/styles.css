@@ -957,6 +957,16 @@ a:focus-visible {
   white-space: nowrap;
 }
 
+.table-billing-filter {
+  border-color: var(--splunk-accent);
+  font-weight: 600;
+}
+
+.table-billing-filter:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--splunk-accent-soft);
+}
+
 .table-pagination-select {
   padding: 0.3rem 0.5rem;
   font-size: 0.8125rem;

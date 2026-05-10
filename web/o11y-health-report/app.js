@@ -1086,6 +1086,36 @@ function peKpiIconSvg(kpiId, accent) {
   return `<svg class="pe-kpi-icon-svg" viewBox="0 0 24 24" width="28" height="28" aria-hidden="true" style="color:${accent}">${path}</svg>`;
 }
 
+// ── Custom Metrics tile: scroll to IM table + filter to Custom ────────────────
+
+function peScrollToImCustomMetrics() {
+  // Find the Infrastructure monitoring section anchor
+  const allAnchors = [...document.querySelectorAll("article[id]")];
+  const imAnchor = allAnchors.find((el) =>
+    (el.querySelector("h2")?.textContent || "").toLowerCase().includes("infrastructure monitoring")
+  ) || document.querySelector("[id^='sec-infrastructure']");
+
+  if (imAnchor) {
+    imAnchor.scrollIntoView({ behavior: "smooth", block: "start" });
+    // Sync sidebar active state
+    const id = imAnchor.id;
+    document.querySelectorAll(".sidebar-nav a").forEach((a) => {
+      a.classList.toggle("is-active", a.getAttribute("href") === `#${id}`);
+    });
+  }
+
+  // Find the Metric Cardinality table's pagination wrap and apply filter
+  const wrap = document.querySelector(".table-pagination-wrap");
+  const allWraps = [...document.querySelectorAll(".table-pagination-wrap")];
+  const imWrap = allWraps.find((w) => {
+    const tbl = w.querySelector("table");
+    return tbl && isMetricCardinalityVolumeTable(tbl);
+  });
+  if (imWrap && typeof imWrap.__o11ySetBillingFilter === "function") {
+    imWrap.__o11ySetBillingFilter("Custom");
+  }
+}
+
 // ── Platform engagement KPI drill-down modal ─────────────────────────────────
 
 /**
@@ -1646,12 +1676,22 @@ function buildPlatformEngagementKpiDeck(payload) {
         <span class="pe-kpi-card__delta-text">${escapeHtml(err ? "Error" : delta.text)}</span>
       </div>
       ${err ? `<p class="pe-kpi-card__err">${escapeHtml(err.slice(0, 200))}</p>` : ""}
-      <span class="pe-kpi-card__drill-hint" aria-hidden="true">View breakdown →</span>
+      <span class="pe-kpi-card__drill-hint" aria-hidden="true">${isCustomMetricsTile ? "View in IM table →" : "View breakdown →"}</span>
     `;
-    card.addEventListener("click", () => peOpenKpiDrilldown(kpi, payload, acc));
-    card.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); peOpenKpiDrilldown(kpi, payload, acc); }
-    });
+    const isCustomMetricsTile = String(kpi.id || "").toLowerCase() === "custom_metrics";
+    if (isCustomMetricsTile) {
+      card.setAttribute("aria-label", `Drill down: ${String(kpi.label || kpi.id || "KPI")} — view Custom metrics in IM table`);
+      const handler = () => peScrollToImCustomMetrics();
+      card.addEventListener("click", handler);
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handler(); }
+      });
+    } else {
+      card.addEventListener("click", () => peOpenKpiDrilldown(kpi, payload, acc));
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); peOpenKpiDrilldown(kpi, payload, acc); }
+      });
+    }
     grid.appendChild(card);
   });
 
@@ -2348,12 +2388,35 @@ function paginateMetricCardinalityTables(rootEl) {
     });
     labelPer.appendChild(select);
 
+    // Billing class filter
+    const billingClasses = [...new Set(dataRows.map((tr) => {
+      const cells = [...tr.querySelectorAll("td")];
+      return cells[1] ? cells[1].textContent.trim() : "";
+    }).filter(Boolean))].sort();
+    const filterLabel = document.createElement("label");
+    filterLabel.className = "table-pagination-per";
+    filterLabel.textContent = "Billing class";
+    const filterSelect = document.createElement("select");
+    filterSelect.className = "table-pagination-select table-billing-filter";
+    const allOpt = document.createElement("option");
+    allOpt.value = "";
+    allOpt.textContent = "All";
+    filterSelect.appendChild(allOpt);
+    billingClasses.forEach((bc) => {
+      const opt = document.createElement("option");
+      opt.value = bc;
+      opt.textContent = bc;
+      filterSelect.appendChild(opt);
+    });
+    filterLabel.appendChild(filterSelect);
+
     toolbar.appendChild(btnFirst);
     toolbar.appendChild(btnPrev);
     toolbar.appendChild(status);
     toolbar.appendChild(btnNext);
     toolbar.appendChild(btnLast);
     toolbar.appendChild(labelPer);
+    toolbar.appendChild(filterLabel);
 
     const parent = table.parentNode;
     parent.insertBefore(wrap, table);
@@ -2363,9 +2426,19 @@ function paginateMetricCardinalityTables(rootEl) {
     let pageSize = DEFAULT_PAGE_SIZE;
     let page = 0;
     const allRows = dataRows;
+    let filteredRows = allRows;
+
+    function applyFilter() {
+      const val = filterSelect.value;
+      filteredRows = val ? allRows.filter((tr) => {
+        const cells = [...tr.querySelectorAll("td")];
+        return cells[1] && cells[1].textContent.trim() === val;
+      }) : allRows;
+      page = 0;
+    }
 
     function totalPages() {
-      return Math.max(1, Math.ceil(allRows.length / pageSize));
+      return Math.max(1, Math.ceil(filteredRows.length / pageSize));
     }
 
     function renderPage() {
@@ -2375,14 +2448,15 @@ function paginateMetricCardinalityTables(rootEl) {
 
       tbody.innerHTML = "";
       const start = page * pageSize;
-      const end = Math.min(start + pageSize, allRows.length);
+      const end = Math.min(start + pageSize, filteredRows.length);
       for (let i = start; i < end; i += 1) {
-        tbody.appendChild(allRows[i]);
+        tbody.appendChild(filteredRows[i]);
       }
 
-      const from = allRows.length === 0 ? 0 : start + 1;
+      const from = filteredRows.length === 0 ? 0 : start + 1;
       const to = end;
-      status.textContent = `Showing ${from}–${to} of ${allRows.length} metrics · Page ${page + 1} of ${pages}`;
+      const filterNote = filterSelect.value ? ` · filtered to "${filterSelect.value}"` : "";
+      status.textContent = `Showing ${from}–${to} of ${filteredRows.length} metrics · Page ${page + 1} of ${pages}${filterNote}`;
 
       const atFirst = page <= 0;
       const atLast = page >= pages - 1;
@@ -2392,28 +2466,26 @@ function paginateMetricCardinalityTables(rootEl) {
       btnLast.disabled = atLast;
     }
 
-    btnFirst.addEventListener("click", () => {
-      page = 0;
-      renderPage();
-    });
-    btnPrev.addEventListener("click", () => {
-      page -= 1;
-      renderPage();
-    });
-    btnNext.addEventListener("click", () => {
-      page += 1;
-      renderPage();
-    });
-    btnLast.addEventListener("click", () => {
-      page = totalPages() - 1;
-      renderPage();
-    });
-
+    btnFirst.addEventListener("click", () => { page = 0; renderPage(); });
+    btnPrev.addEventListener("click", () => { page -= 1; renderPage(); });
+    btnNext.addEventListener("click", () => { page += 1; renderPage(); });
+    btnLast.addEventListener("click", () => { page = totalPages() - 1; renderPage(); });
     select.addEventListener("change", () => {
       pageSize = parseInt(select.value, 10) || DEFAULT_PAGE_SIZE;
       page = 0;
       renderPage();
     });
+    filterSelect.addEventListener("change", () => { applyFilter(); renderPage(); });
+
+    // Expose programmatic filter control for drill-through from KPI tiles
+    wrap.__o11ySetBillingFilter = (billingClass) => {
+      filterSelect.value = billingClass || "";
+      // Show all rows when filtering programmatically
+      select.value = "500";
+      pageSize = 500;
+      applyFilter();
+      renderPage();
+    };
 
     bindPaginatedTableForPrint(wrap, tbody, allRows, renderPage);
     allRows.forEach((tr) => tr.remove());
