@@ -923,6 +923,107 @@ def create_app():
 
         return jsonify({"job": meta}), HTTPStatus.CREATED
 
+    @app.get("/api/jobs/<job_id>/drilldown/custom-metrics")
+    def drilldown_custom_metrics(job_id: str):
+        """
+        On-demand drill-down: return the top custom-billing-class metrics for this job's org.
+        Calls /v2/metrics-usage/metrics/_ and filters to Custom billing class.
+        Query params: lookback (P1D|P7D|P30D, default P7D), limit (default 1000).
+        """
+        if not _safe_job_id(job_id):
+            return jsonify({"error": "invalid id"}), HTTPStatus.BAD_REQUEST
+        job_dir = JOBS_ROOT / job_id
+        profile_path = job_dir / "_ephemeral_profile.yaml"
+        if not profile_path.is_file():
+            return jsonify({"error": "job profile not found — job may have been deleted"}), HTTPStatus.NOT_FOUND
+
+        # Load realm + token from the ephemeral profile
+        try:
+            import yaml as _yaml  # type: ignore[import-untyped]
+        except ImportError:
+            _yaml = None
+        try:
+            raw_profile = profile_path.read_text(encoding="utf-8")
+            if _yaml is not None:
+                prof = _yaml.safe_load(raw_profile) or {}
+            else:
+                # Minimal YAML scalar parser for the two fields we need
+                prof = {}
+                for line in raw_profile.splitlines():
+                    if ":" in line:
+                        k, _, v = line.partition(":")
+                        prof[k.strip()] = v.strip().strip("\"'")
+        except OSError as e:
+            return jsonify({"error": f"could not read profile: {e}"}), HTTPStatus.INTERNAL_SERVER_ERROR
+
+        token = str(prof.get("access_token") or "").strip()
+        realm = str(prof.get("realm") or "us0").strip()
+        if not token:
+            return jsonify({"error": "no token in job profile"}), HTTPStatus.INTERNAL_SERVER_ERROR
+
+        lookback = str(request.args.get("lookback") or "P7D").strip().upper()
+        if lookback not in ("P1D", "P7D", "P30D"):
+            lookback = "P7D"
+        try:
+            limit = max(100, min(10000, int(request.args.get("limit") or "2000")))
+        except (ValueError, TypeError):
+            limit = 2000
+
+        # Import the IM breakdown helpers
+        import importlib
+        im_mod = importlib.import_module("o11y_im_metrics_usage_breakdown")
+
+        payload, err = im_mod.fetch_metrics_usage_payload(
+            token, realm,
+            lookback=lookback,
+            limit=limit,
+            billable=True,
+            order_by="-averageHourlyMtsCount",
+        )
+        if err:
+            return jsonify({"error": f"Usage API error: {err}"}), HTTPStatus.BAD_GATEWAY
+
+        rows = im_mod._extract_row_list(payload)
+        rows = im_mod._sort_rows(rows)
+
+        total_mts = sum(im_mod._mts_value(r) for r in rows)
+        custom_rows = []
+        for r in rows:
+            mname = im_mod._metric_name(r)
+            bc = im_mod._billing_class_from_row(r, mname)
+            if bc != "Custom":
+                continue
+            mts = im_mod._mts_value(r)
+            pct = (100.0 * mts / total_mts) if total_mts > 0 else 0.0
+            util = im_mod._utilization_from_row(r)
+            custom_rows.append({
+                "metricName": mname,
+                "utilization": util,
+                "averageHourlyMts": round(mts, 2),
+                "pctOfOrgTotal": round(pct, 4),
+            })
+
+        total_custom_mts = sum(r["averageHourlyMts"] for r in custom_rows)
+        # Add pct of custom subtotal
+        for r in custom_rows:
+            r["pctOfCustomTotal"] = round(
+                100.0 * r["averageHourlyMts"] / total_custom_mts if total_custom_mts > 0 else 0.0, 4
+            )
+
+        util_summary: dict[str, float] = {}
+        for r in custom_rows:
+            util_summary[r["utilization"]] = util_summary.get(r["utilization"], 0) + r["averageHourlyMts"]
+
+        return jsonify({
+            "realm": realm,
+            "lookback": lookback,
+            "totalOrgMts": round(total_mts, 2),
+            "totalCustomMts": round(total_custom_mts, 2),
+            "customMetricCount": len(custom_rows),
+            "utilizationSummary": util_summary,
+            "metrics": custom_rows,
+        })
+
     @app.delete("/api/jobs/<job_id>")
     def delete_job(job_id: str):
         if not _safe_job_id(job_id):

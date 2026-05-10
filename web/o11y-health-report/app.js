@@ -1188,6 +1188,101 @@ function peDrilldownTableHtml(pts, label, acc) {
 }
 
 /**
+ * Fetch the custom-metrics breakdown from the hub API and render it into `container`.
+ * Only available when the report was loaded via the hub (hubJob param in URL).
+ */
+async function peLoadCustomMetricsBreakdown(container, lookback) {
+  const params = new URLSearchParams(window.location.search);
+  const jobId = params.get("hubJob") || "";
+  if (!jobId) {
+    container.innerHTML = `<p class="pe-drill-offline-note">Live breakdown requires opening this report from the Health Check Hub (<code>hubJob</code> param missing).</p>`;
+    return;
+  }
+
+  container.innerHTML = `<div class="pe-drill-loading"><span class="pe-drill-spinner"></span> Loading metric breakdown from Usage Analytics API…</div>`;
+
+  try {
+    const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/drilldown/custom-metrics?lookback=${encodeURIComponent(lookback)}&limit=2000`);
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      container.innerHTML = `<p class="pe-drill-fetch-error">API error: ${escapeHtml(data.error || `HTTP ${resp.status}`)}</p>`;
+      return;
+    }
+
+    const { metrics = [], utilizationSummary = {}, totalCustomMts, totalOrgMts, customMetricCount } = data;
+
+    // Utilization breakdown bar
+    const UTIL_ORDER = ["R0 - Unused", "R1 - Inactive Charts", "R2 - API queries", "R3 - Active charts", "R4 - Detectors"];
+    const UTIL_COLORS = { "R0 - Unused": "#ef4444", "R1 - Inactive Charts": "#f97316", "R2 - API queries": "#eab308", "R3 - Active charts": "#22c55e", "R4 - Detectors": "#3b82f6" };
+    const utilRows = UTIL_ORDER.filter((u) => utilizationSummary[u] > 0).map((u) => {
+      const mts = utilizationSummary[u];
+      const pct = totalCustomMts > 0 ? (100 * mts / totalCustomMts) : 0;
+      return { label: u, mts, pct, color: UTIL_COLORS[u] || "#94a3b8" };
+    });
+
+    const barSegs = utilRows.map((u) =>
+      `<div class="pe-drill-util-seg" style="width:${u.pct.toFixed(1)}%;background:${u.color}" title="${escapeHtml(u.label)}: ${u.pct.toFixed(1)}%"></div>`
+    ).join("");
+
+    const utilLegend = utilRows.map((u) =>
+      `<div class="pe-drill-util-leg"><span class="pe-drill-util-dot" style="background:${u.color}"></span>` +
+      `<span class="pe-drill-util-leg-label">${escapeHtml(u.label)}</span>` +
+      `<span class="pe-drill-util-leg-val">${escapeHtml(formatPeScalarDisplay(u.mts))} MTS (${u.pct.toFixed(1)}%)</span></div>`
+    ).join("");
+
+    // Top metrics table
+    const tableRows = metrics.slice(0, 200).map((m) => {
+      const utilColor = UTIL_COLORS[m.utilization] || "#94a3b8";
+      return `<tr>
+        <td class="pe-drill-mname">${escapeHtml(m.metricName)}</td>
+        <td><span class="pe-drill-util-badge" style="background:${utilColor}20;color:${utilColor};border-color:${utilColor}40">${escapeHtml(m.utilization)}</span></td>
+        <td class="pe-drill-val">${escapeHtml(formatPeScalarDisplay(m.averageHourlyMts))}</td>
+        <td class="pe-drill-val">${m.pctOfCustomTotal.toFixed(2)}%</td>
+        <td class="pe-drill-val">${m.pctOfOrgTotal.toFixed(2)}%</td>
+      </tr>`;
+    }).join("");
+
+    const moreNote = metrics.length > 200 ? `<p class="pe-drill-more-note">Showing top 200 of ${metrics.length} custom metrics.</p>` : "";
+
+    container.innerHTML = `
+      <div class="pe-drill-cm-summary">
+        <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num">${escapeHtml(formatPeScalarDisplay(customMetricCount))}</span><span class="pe-drill-cm-stat-label">Custom metrics</span></div>
+        <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num">${escapeHtml(formatPeScalarDisplay(totalCustomMts))}</span><span class="pe-drill-cm-stat-label">Custom MTS (avg/hr)</span></div>
+        <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num">${totalOrgMts > 0 ? (100 * totalCustomMts / totalOrgMts).toFixed(1) + "%" : "—"}</span><span class="pe-drill-cm-stat-label">% of org total MTS</span></div>
+        <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num">${escapeHtml(lookback)}</span><span class="pe-drill-cm-stat-label">Lookback window</span></div>
+      </div>
+      <h5 class="pe-drill-cm-section-head">Utilization breakdown</h5>
+      <div class="pe-drill-util-bar">${barSegs || '<div style="width:100%;background:var(--splunk-border);height:100%"></div>'}</div>
+      <div class="pe-drill-util-legend">${utilLegend || '<p class="pe-drill-empty">No utilization data.</p>'}</div>
+      <div class="pe-drill-cm-insight">${buildCustomMetricsInsight(utilRows, totalCustomMts)}</div>
+      <h5 class="pe-drill-cm-section-head">Top custom metrics by MTS volume</h5>
+      <table class="pe-drill-table pe-drill-cm-table">
+        <thead><tr><th>Metric name</th><th>Utilization</th><th>Avg MTS/hr</th><th>% of custom</th><th>% of org</th></tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table>
+      ${moreNote}`;
+  } catch (e) {
+    container.innerHTML = `<p class="pe-drill-fetch-error">Request failed: ${escapeHtml(String(e))}</p>`;
+  }
+}
+
+/**
+ * Generate an actionable insight sentence based on utilization distribution.
+ */
+function buildCustomMetricsInsight(utilRows, totalCustomMts) {
+  const unusedRow = utilRows.find((u) => u.label === "R0 - Unused");
+  const inactiveRow = utilRows.find((u) => u.label === "R1 - Inactive Charts");
+  const wastedPct = ((unusedRow?.pct || 0) + (inactiveRow?.pct || 0));
+  const wastedMts = ((unusedRow?.mts || 0) + (inactiveRow?.mts || 0));
+  if (wastedPct === 0) return "";
+  const severity = wastedPct >= 50 ? "pe-drill-insight--high" : wastedPct >= 20 ? "pe-drill-insight--medium" : "pe-drill-insight--low";
+  return `<div class="pe-drill-insight ${severity}">
+    <strong>${wastedPct.toFixed(0)}% of custom MTS (${escapeHtml(formatPeScalarDisplay(wastedMts))} avg/hr) is Unused or only in Inactive Charts.</strong>
+    Use Metric Pipeline Management to archive or drop these — they count toward your custom metrics limit but provide no active value.
+  </div>`;
+}
+
+/**
  * Open the KPI drill-down modal for a given kpi + payload.
  */
 function peOpenKpiDrilldown(kpi, payload, acc) {
@@ -1246,9 +1341,28 @@ function peOpenKpiDrilldown(kpi, payload, acc) {
         </details>`
       : "";
 
+  const isCustomMetrics = String(kpi.id || "").toLowerCase() === "custom_metrics";
+  const customMetricsSection = isCustomMetrics ? `
+    <div class="pe-drill-cm-panel">
+      <div class="pe-drill-cm-header">
+        <h4 class="pe-drill-cm-title">Custom metrics source breakdown</h4>
+        <p class="pe-drill-cm-subtitle">Which metrics are driving your custom MTS count, what they're used for, and where to reduce.</p>
+        <div class="pe-drill-cm-controls">
+          <label class="pe-drill-cm-lookback-label" for="pe-drill-lookback">Lookback</label>
+          <select id="pe-drill-lookback" class="pe-drill-lookback-select">
+            <option value="P1D">1 day</option>
+            <option value="P7D" selected>7 days</option>
+            <option value="P30D">30 days</option>
+          </select>
+          <button class="btn pe-drill-load-btn" id="pe-drill-load-cm">Load breakdown</button>
+        </div>
+      </div>
+      <div id="pe-drill-cm-body"></div>
+    </div>` : "";
+
   modal.innerHTML = `
     <div class="pe-drill-backdrop"></div>
-    <div class="pe-drill-panel" role="document">
+    <div class="pe-drill-panel" role="document"${isCustomMetrics ? ' style="max-height:94vh"' : ""}>
       <div class="pe-drill-header" style="border-top: 3px solid ${escapeHtml(acc.ring)}">
         <div class="pe-drill-header-left">
           <div class="pe-drill-header-icon">${peKpiIconSvg(String(kpi.id || ""), acc.ring)}</div>
@@ -1275,8 +1389,12 @@ function peOpenKpiDrilldown(kpi, payload, acc) {
         <button class="pe-drill-close" aria-label="Close drill-down" id="pe-drill-close-btn">✕</button>
       </div>
       <div class="pe-drill-body">
-        ${comparisonSection}
-        ${otherSection}
+        ${customMetricsSection}
+        <details class="pe-drill-timeseries-details"${isCustomMetrics ? "" : " open"}>
+          <summary class="pe-drill-timeseries-summary">Trend data — baseline vs comparison window</summary>
+          ${comparisonSection}
+          ${otherSection}
+        </details>
       </div>
     </div>`;
 
@@ -1295,6 +1413,26 @@ function peOpenKpiDrilldown(kpi, payload, acc) {
     if (e.key === "Escape") { close(); document.removeEventListener("keydown", onKey); }
   };
   document.addEventListener("keydown", onKey);
+
+  // Wire up custom metrics breakdown load button
+  if (isCustomMetrics) {
+    const loadBtn = document.getElementById("pe-drill-load-cm");
+    const cmBody = document.getElementById("pe-drill-cm-body");
+    const lookbackSel = document.getElementById("pe-drill-lookback");
+    if (loadBtn && cmBody) {
+      const doLoad = () => {
+        loadBtn.disabled = true;
+        peLoadCustomMetricsBreakdown(cmBody, lookbackSel?.value || "P7D").finally(() => {
+          loadBtn.disabled = false;
+        });
+      };
+      loadBtn.addEventListener("click", doLoad);
+      // Auto-load immediately when hubJob is present
+      if (new URLSearchParams(window.location.search).get("hubJob")) {
+        doLoad();
+      }
+    }
+  }
 }
 
 const PE_KPI_ACCENTS = [

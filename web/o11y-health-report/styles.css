@@ -1664,6 +1664,293 @@ a:focus-visible {
   padding: 0.35rem 0;
 }
 
+/* ----- Trend data collapsible (non-CM KPIs show open; CM shows closed by default) ----- */
+.pe-drill-timeseries-details {
+  margin-top: 0.25rem;
+}
+
+.pe-drill-timeseries-summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--splunk-text-muted);
+  padding: 0.35rem 0 0.5rem;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.pe-drill-timeseries-summary::before {
+  content: "▸";
+  font-size: 0.7rem;
+  transition: transform 0.15s;
+}
+
+details[open] .pe-drill-timeseries-summary::before {
+  transform: rotate(90deg);
+}
+
+/* ----- Custom metrics deep-dive panel ----- */
+.pe-drill-cm-panel {
+  margin-bottom: 1.25rem;
+  border: 1px solid var(--splunk-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.pe-drill-cm-header {
+  padding: 1rem 1.25rem 0.75rem;
+  background: var(--splunk-page-bg);
+  border-bottom: 1px solid var(--splunk-border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.5rem 1rem;
+}
+
+.pe-drill-cm-title {
+  margin: 0 0 0.2rem;
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--splunk-text);
+  flex: 1 1 100%;
+}
+
+.pe-drill-cm-subtitle {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--splunk-text-subtle);
+  flex: 1 1 100%;
+}
+
+.pe-drill-cm-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.35rem;
+}
+
+.pe-drill-cm-lookback-label {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--splunk-text-muted);
+}
+
+.pe-drill-lookback-select {
+  font-size: 0.78rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--splunk-border-strong);
+  border-radius: 6px;
+  background: var(--splunk-card-bg);
+  color: var(--splunk-text);
+  cursor: pointer;
+}
+
+.pe-drill-load-btn {
+  font-size: 0.78rem;
+  padding: 0.28rem 0.85rem;
+  background: var(--pe-ring, var(--splunk-accent));
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: opacity 0.12s;
+}
+
+.pe-drill-load-btn:hover { opacity: 0.88; }
+.pe-drill-load-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+#pe-drill-cm-body {
+  padding: 1rem 1.25rem;
+}
+
+/* Loading spinner */
+.pe-drill-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  font-size: 0.82rem;
+  color: var(--splunk-text-muted);
+  padding: 0.75rem 0;
+}
+
+.pe-drill-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--splunk-border-strong);
+  border-top-color: var(--pe-ring, var(--splunk-accent));
+  border-radius: 50%;
+  animation: pe-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes pe-spin { to { transform: rotate(360deg); } }
+
+.pe-drill-fetch-error {
+  font-size: 0.82rem;
+  color: var(--status-critical);
+  margin: 0.5rem 0;
+}
+
+.pe-drill-offline-note {
+  font-size: 0.82rem;
+  color: var(--splunk-text-subtle);
+  font-style: italic;
+  margin: 0.5rem 0;
+}
+
+/* Summary stat chips */
+.pe-drill-cm-summary {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.pe-drill-cm-stat {
+  flex: 1 1 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.6rem 0.75rem;
+  background: var(--splunk-page-bg);
+  border: 1px solid var(--splunk-border);
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+.pe-drill-cm-stat-num {
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--pe-ring, var(--splunk-accent));
+  line-height: 1.15;
+}
+
+.pe-drill-cm-stat-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--splunk-text-muted);
+  margin-top: 0.2rem;
+}
+
+/* Utilization stacked bar */
+.pe-drill-cm-section-head {
+  margin: 0.75rem 0 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--splunk-text-muted);
+}
+
+.pe-drill-util-bar {
+  display: flex;
+  height: 14px;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--splunk-border);
+  margin-bottom: 0.6rem;
+}
+
+.pe-drill-util-seg {
+  height: 100%;
+  min-width: 2px;
+  transition: width 0.3s ease;
+}
+
+.pe-drill-util-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.pe-drill-util-leg {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.76rem;
+  color: var(--splunk-text-muted);
+}
+
+.pe-drill-util-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.pe-drill-util-leg-label {
+  color: var(--splunk-text);
+  font-weight: 500;
+}
+
+.pe-drill-util-leg-val {
+  color: var(--splunk-text-muted);
+}
+
+/* Insight callout */
+.pe-drill-insight {
+  padding: 0.6rem 0.85rem;
+  border-radius: var(--radius);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin: 0.5rem 0 0.75rem;
+}
+
+.pe-drill-insight--high {
+  background: rgba(239, 68, 68, 0.08);
+  border-left: 3px solid #ef4444;
+  color: #7f1d1d;
+}
+
+.pe-drill-insight--medium {
+  background: rgba(249, 115, 22, 0.08);
+  border-left: 3px solid #f97316;
+  color: #7c2d12;
+}
+
+.pe-drill-insight--low {
+  background: rgba(234, 179, 8, 0.08);
+  border-left: 3px solid #eab308;
+  color: #713f12;
+}
+
+/* Metric name column */
+.pe-drill-mname {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.74rem;
+  word-break: break-all;
+  color: var(--splunk-text);
+}
+
+.pe-drill-util-badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  border: 1px solid;
+  font-size: 0.68rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pe-drill-cm-table {
+  font-size: 0.78rem;
+}
+
+.pe-drill-more-note {
+  font-size: 0.75rem;
+  color: var(--splunk-text-subtle);
+  font-style: italic;
+  margin: 0.4rem 0 0;
+}
+
 /* ----- Responsive ----- */
 @media (max-width: 900px) {
   .app-shell {
