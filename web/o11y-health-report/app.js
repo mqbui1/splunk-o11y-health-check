@@ -1086,6 +1086,217 @@ function peKpiIconSvg(kpiId, accent) {
   return `<svg class="pe-kpi-icon-svg" viewBox="0 0 24 24" width="28" height="28" aria-hidden="true" style="color:${accent}">${path}</svg>`;
 }
 
+// ── Platform engagement KPI drill-down modal ─────────────────────────────────
+
+/**
+ * Format a Unix-ms timestamp as "MMM D, YYYY HH:MM UTC".
+ */
+function formatPeTimestamp(ms) {
+  if (!Number.isFinite(ms)) return "—";
+  const d = new Date(ms);
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+}
+
+/**
+ * Given a kpi and the payload timeline, classify each point as "baseline", "comparison", or "other".
+ * Returns { baselinePts, comparisonPts, otherPts, baselineLabel, comparisonLabel }.
+ */
+function peClassifyPoints(kpi, payload) {
+  const pts = (kpi.points || [])
+    .filter((r) => Array.isArray(r) && r.length >= 2)
+    .map((r) => [Number(r[0]), Number(r[1])])
+    .filter((r) => Number.isFinite(r[0]) && Number.isFinite(r[1]));
+
+  const tl = payload.timeline || {};
+  const mode = tl.comparisonMode;
+
+  // Resolve window bounds in ms from kpi-level overrides or payload-level fields.
+  const parseIsoMs = (s) => {
+    if (!s || typeof s !== "string") return null;
+    const d = new Date(s + (s.length === 10 ? "T00:00:00Z" : ""));
+    return Number.isFinite(d.getTime()) ? d.getTime() : null;
+  };
+
+  let baseStart = null, baseEnd = null, curStart = null, curEnd = null;
+  let baselineLabel = "Baseline", comparisonLabel = "Comparison";
+
+  if (mode === "month_vs_month" && tl.baseline && tl.comparison) {
+    baseStart = parseIsoMs(tl.baseline.rangeStart);
+    baseEnd = parseIsoMs(tl.baseline.rangeEnd);
+    curStart = parseIsoMs(tl.comparison.rangeStart);
+    curEnd = parseIsoMs(tl.comparison.rangeEnd);
+    baselineLabel = `Baseline (${tl.baseline.monthLabel || ""})`;
+    comparisonLabel = `Comparison (${tl.comparison.monthLabel || ""})`;
+    // rangeEnd is end-of-month date string — extend to end of that day
+    if (baseEnd != null) baseEnd += 86400000 - 1;
+    if (curEnd != null) curEnd += 86400000 - 1;
+  } else {
+    // Use kpi-level or payload-level window fields (ISO date strings)
+    const bs = kpi.baselineWindowStart || payload.baselineWindowStart;
+    const be = kpi.baselineWindowEnd || payload.baselineWindowEnd;
+    const cs = kpi.currentWindowStart || payload.currentWindowStart;
+    const ce = kpi.currentWindowEnd || payload.currentWindowEnd;
+    baseStart = parseIsoMs(bs);
+    baseEnd = parseIsoMs(be);
+    curStart = parseIsoMs(cs);
+    curEnd = parseIsoMs(ce);
+    if (baseEnd != null) baseEnd += 86400000 - 1;
+    if (curEnd != null) curEnd += 86400000 - 1;
+    if (mode === "rolling_default") comparisonLabel = "Current";
+  }
+
+  const inRange = (ts, lo, hi) => lo != null && hi != null && ts >= lo && ts <= hi;
+
+  const baselinePts = pts.filter((r) => inRange(r[0], baseStart, baseEnd));
+  const comparisonPts = pts.filter((r) => inRange(r[0], curStart, curEnd));
+  const classifiedTs = new Set([...baselinePts, ...comparisonPts].map((r) => r[0]));
+  const otherPts = pts.filter((r) => !classifiedTs.has(r[0]));
+
+  return { baselinePts, comparisonPts, otherPts, baselineLabel, comparisonLabel, allPts: pts };
+}
+
+function peDrilldownTableHtml(pts, label, acc) {
+  if (!pts.length) {
+    return `<p class="pe-drill-empty">No data points in the ${escapeHtml(label)} window.</p>`;
+  }
+  const rows = pts
+    .slice()
+    .sort((a, b) => a[0] - b[0])
+    .map(
+      (r) =>
+        `<tr><td class="pe-drill-ts">${escapeHtml(formatPeTimestamp(r[0]))}</td>` +
+        `<td class="pe-drill-val">${escapeHtml(formatPeScalarDisplay(r[1]))}</td></tr>`
+    )
+    .join("");
+  const vals = pts.map((r) => r[1]);
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  return `
+    <table class="pe-drill-table">
+      <thead><tr><th>Timestamp (UTC)</th><th>Value</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="pe-drill-summary">
+      <span><strong>Points:</strong> ${pts.length}</span>
+      <span><strong>Avg:</strong> ${escapeHtml(formatPeScalarDisplay(mean))}</span>
+      <span><strong>Min:</strong> ${escapeHtml(formatPeScalarDisplay(min))}</span>
+      <span><strong>Max:</strong> ${escapeHtml(formatPeScalarDisplay(max))}</span>
+    </div>`;
+}
+
+/**
+ * Open the KPI drill-down modal for a given kpi + payload.
+ */
+function peOpenKpiDrilldown(kpi, payload, acc) {
+  // Remove any existing modal
+  document.getElementById("pe-drill-modal")?.remove();
+
+  const { baselinePts, comparisonPts, otherPts, baselineLabel, comparisonLabel, allPts } =
+    peClassifyPoints(kpi, payload);
+
+  const hasWindows = baselinePts.length > 0 || comparisonPts.length > 0;
+  const label = String(kpi.label || kpi.id || "KPI");
+  const metric = String(kpi.metric || "");
+  const delta = formatPeDeltaDisplay(kpi.pctChange);
+  const arrow = delta.dir === "up" ? "▲" : delta.dir === "down" ? "▼" : "◆";
+  const deltaClass =
+    delta.dir === "up" ? "pe-kpi-card__delta--up" : delta.dir === "down" ? "pe-kpi-card__delta--down" : "pe-kpi-card__delta--flat";
+
+  const baseDisp = kpi.baseline != null ? formatPeScalarDisplay(kpi.baseline) : "—";
+  const curDisp = kpi.current != null ? formatPeScalarDisplay(kpi.current) : "—";
+
+  const modal = document.createElement("div");
+  modal.id = "pe-drill-modal";
+  modal.className = "pe-drill-modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-label", `Drill-down: ${label}`);
+  modal.style.setProperty("--pe-ring", acc.ring);
+  modal.style.setProperty("--pe-stroke", acc.stroke);
+  modal.style.setProperty("--pe-soft", acc.soft);
+
+  const comparisonSection = hasWindows
+    ? `<div class="pe-drill-windows">
+        <div class="pe-drill-window pe-drill-window--baseline">
+          <h4 class="pe-drill-window-title">${escapeHtml(baselineLabel)}</h4>
+          <div class="pe-drill-avg-chip">${escapeHtml(baseDisp)}</div>
+          ${peDrilldownTableHtml(baselinePts, baselineLabel, acc)}
+        </div>
+        <div class="pe-drill-window pe-drill-window--comparison">
+          <h4 class="pe-drill-window-title">${escapeHtml(comparisonLabel)}</h4>
+          <div class="pe-drill-avg-chip pe-drill-avg-chip--comparison">${escapeHtml(curDisp)}</div>
+          ${peDrilldownTableHtml(comparisonPts, comparisonLabel, acc)}
+        </div>
+      </div>`
+    : `<div class="pe-drill-windows">
+        <div class="pe-drill-window" style="flex:1">
+          <h4 class="pe-drill-window-title">All data points (${allPts.length})</h4>
+          ${peDrilldownTableHtml(allPts, "all", acc)}
+        </div>
+      </div>`;
+
+  const otherSection =
+    otherPts.length > 0
+      ? `<details class="pe-drill-other">
+          <summary>Other / transition points (${otherPts.length})</summary>
+          ${peDrilldownTableHtml(otherPts, "other", acc)}
+        </details>`
+      : "";
+
+  modal.innerHTML = `
+    <div class="pe-drill-backdrop"></div>
+    <div class="pe-drill-panel" role="document">
+      <div class="pe-drill-header" style="border-top: 3px solid ${escapeHtml(acc.ring)}">
+        <div class="pe-drill-header-left">
+          <div class="pe-drill-header-icon">${peKpiIconSvg(String(kpi.id || ""), acc.ring)}</div>
+          <div>
+            <h3 class="pe-drill-title">${escapeHtml(label)}</h3>
+            ${metric ? `<p class="pe-drill-metric">${escapeHtml(metric)}</p>` : ""}
+          </div>
+        </div>
+        <div class="pe-drill-header-right">
+          <div class="pe-drill-header-vals">
+            <div class="pe-drill-header-val pe-drill-header-val--base">
+              <span class="pe-drill-header-val-label">Baseline</span>
+              <span class="pe-drill-header-val-num">${escapeHtml(baseDisp)}</span>
+            </div>
+            <div class="pe-drill-header-val pe-drill-header-val--cmp">
+              <span class="pe-drill-header-val-label">Comparison</span>
+              <span class="pe-drill-header-val-num">${escapeHtml(curDisp)}</span>
+            </div>
+          </div>
+          <div class="pe-kpi-card__delta ${deltaClass}" style="margin-top:0.35rem">
+            <span aria-hidden="true">${arrow}</span> ${escapeHtml(delta.text)}
+          </div>
+        </div>
+        <button class="pe-drill-close" aria-label="Close drill-down" id="pe-drill-close-btn">✕</button>
+      </div>
+      <div class="pe-drill-body">
+        ${comparisonSection}
+        ${otherSection}
+      </div>
+    </div>`;
+
+  document.body.appendChild(modal);
+  // Animate in
+  requestAnimationFrame(() => modal.classList.add("pe-drill-modal--open"));
+
+  const close = () => {
+    modal.classList.remove("pe-drill-modal--open");
+    modal.addEventListener("transitionend", () => modal.remove(), { once: true });
+  };
+
+  document.getElementById("pe-drill-close-btn").addEventListener("click", close);
+  modal.querySelector(".pe-drill-backdrop").addEventListener("click", close);
+  const onKey = (e) => {
+    if (e.key === "Escape") { close(); document.removeEventListener("keydown", onKey); }
+  };
+  document.addEventListener("keydown", onKey);
+}
+
 const PE_KPI_ACCENTS = [
   { ring: "#7c3aed", stroke: "#8b5cf6", soft: "rgba(124,58,237,0.12)" },
   { ring: "#ea580c", stroke: "#f97316", soft: "rgba(234,88,12,0.12)" },
@@ -1228,6 +1439,10 @@ function buildPlatformEngagementKpiDeck(payload) {
             ? "◆"
             : "—";
 
+    card.setAttribute("tabindex", "0");
+    card.setAttribute("role", "button");
+    card.setAttribute("aria-label", `Drill down: ${String(kpi.label || kpi.id || "KPI")}`);
+    card.classList.add("pe-kpi-card--drillable");
     card.innerHTML = `
       <h4 class="pe-kpi-card__title">${escapeHtml(String(kpi.label || kpi.id || "KPI"))}</h4>
       <div class="pe-kpi-card__icon-ring" aria-hidden="true">
@@ -1240,7 +1455,12 @@ function buildPlatformEngagementKpiDeck(payload) {
         <span class="pe-kpi-card__delta-text">${escapeHtml(err ? "Error" : delta.text)}</span>
       </div>
       ${err ? `<p class="pe-kpi-card__err">${escapeHtml(err.slice(0, 200))}</p>` : ""}
+      <span class="pe-kpi-card__drill-hint" aria-hidden="true">View breakdown →</span>
     `;
+    card.addEventListener("click", () => peOpenKpiDrilldown(kpi, payload, acc));
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); peOpenKpiDrilldown(kpi, payload, acc); }
+    });
     grid.appendChild(card);
   });
 

@@ -1366,6 +1366,304 @@ a:focus-visible {
   line-height: 1.35;
 }
 
+/* ----- KPI card drill-down affordance ----- */
+.pe-kpi-card--drillable {
+  cursor: pointer;
+}
+
+.pe-kpi-card--drillable:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.pe-kpi-card__drill-hint {
+  display: block;
+  margin-top: auto;
+  padding-top: 0.55rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--pe-ring, var(--splunk-accent));
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  text-align: right;
+}
+
+.pe-kpi-card--drillable:hover .pe-kpi-card__drill-hint,
+.pe-kpi-card--drillable:focus-visible .pe-kpi-card__drill-hint {
+  opacity: 1;
+}
+
+/* ----- KPI drill-down modal ----- */
+.pe-drill-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.pe-drill-modal--open {
+  opacity: 1;
+}
+
+.pe-drill-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(17, 9, 22, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+.pe-drill-panel {
+  position: relative;
+  z-index: 1;
+  background: var(--splunk-card-bg);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  box-shadow: var(--shadow-lg);
+  width: 100%;
+  max-width: 1100px;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(24px);
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.pe-drill-modal--open .pe-drill-panel {
+  transform: translateY(0);
+}
+
+.pe-drill-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem 1rem;
+  border-bottom: 1px solid var(--splunk-border);
+  flex-shrink: 0;
+}
+
+.pe-drill-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.pe-drill-header-icon {
+  flex-shrink: 0;
+}
+
+.pe-drill-title {
+  margin: 0 0 0.2rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--splunk-text);
+}
+
+.pe-drill-metric {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--splunk-text-subtle);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  word-break: break-all;
+}
+
+.pe-drill-header-right {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.pe-drill-header-vals {
+  display: flex;
+  gap: 1.25rem;
+}
+
+.pe-drill-header-val {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+}
+
+.pe-drill-header-val-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--splunk-text-muted);
+}
+
+.pe-drill-header-val--base .pe-drill-header-val-num {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--splunk-text);
+}
+
+.pe-drill-header-val--cmp .pe-drill-header-val-num {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--pe-ring, var(--splunk-accent));
+}
+
+.pe-drill-close {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--splunk-border);
+  border-radius: 6px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--splunk-text-muted);
+  transition: background 0.12s, color 0.12s;
+}
+
+.pe-drill-close:hover {
+  background: var(--splunk-border);
+  color: var(--splunk-text);
+}
+
+.pe-drill-body {
+  overflow-y: auto;
+  padding: 1.25rem 1.5rem 1.5rem;
+  flex: 1;
+}
+
+.pe-drill-windows {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.pe-drill-window {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.pe-drill-window-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--splunk-text-muted);
+}
+
+.pe-drill-window--baseline .pe-drill-window-title {
+  color: var(--splunk-text-muted);
+}
+
+.pe-drill-window--comparison .pe-drill-window-title {
+  color: var(--pe-ring, var(--splunk-accent));
+}
+
+.pe-drill-avg-chip {
+  display: inline-block;
+  padding: 0.2rem 0.65rem;
+  background: var(--splunk-page-bg);
+  border: 1px solid var(--splunk-border);
+  border-radius: 20px;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--splunk-text);
+  margin-bottom: 0.65rem;
+}
+
+.pe-drill-avg-chip--comparison {
+  background: var(--pe-soft, rgba(155, 28, 49, 0.08));
+  border-color: var(--pe-ring, var(--splunk-accent));
+  color: var(--pe-ring, var(--splunk-accent));
+}
+
+.pe-drill-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.pe-drill-table th,
+.pe-drill-table td {
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid var(--splunk-border);
+}
+
+.pe-drill-table thead th {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--splunk-text-muted);
+  background: var(--splunk-page-bg);
+  position: sticky;
+  top: 0;
+}
+
+.pe-drill-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.pe-drill-table tbody tr:hover td {
+  background: var(--splunk-page-bg);
+}
+
+.pe-drill-ts {
+  color: var(--splunk-text-subtle);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.pe-drill-val {
+  font-weight: 600;
+  text-align: right;
+  width: 5rem;
+}
+
+.pe-drill-summary {
+  display: flex;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  background: var(--splunk-page-bg);
+  border-radius: var(--radius);
+  font-size: 0.78rem;
+  color: var(--splunk-text-muted);
+}
+
+.pe-drill-summary strong {
+  color: var(--splunk-text);
+}
+
+.pe-drill-empty {
+  font-size: 0.82rem;
+  color: var(--splunk-text-subtle);
+  font-style: italic;
+  margin: 0.5rem 0;
+}
+
+.pe-drill-other {
+  margin-top: 1.25rem;
+}
+
+.pe-drill-other summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--splunk-text-muted);
+  padding: 0.35rem 0;
+}
+
 /* ----- Responsive ----- */
 @media (max-width: 900px) {
   .app-shell {
