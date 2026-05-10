@@ -42,6 +42,7 @@ Environment: ``SPLUNK_ACCESS_TOKEN`` overrides profile ``access_token``; child s
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
@@ -1776,6 +1777,12 @@ def main() -> int:
             logger.error("License script did not write JSON to %s", lic_json)
             logger.info("Continuing to next check…")
 
+    # ── Wave 2: build argv lists for all remaining steps, then run in parallel ──────────────────
+    # Platform engagement optionally reads the license JSON produced in wave 1.
+    # All other wave-2 steps are fully independent.
+
+    wave2_tasks: list[tuple[str, list[str]]] = []  # (label, argv)
+
     if skip_platform_engagement:
         logger.info(
             "Skipping platform engagement trends (--skip-platform-engagement or profile "
@@ -1820,32 +1827,7 @@ def main() -> int:
             )
         elif pe_as_of:
             pe_argv.extend(["--as-of-date", pe_as_of])
-        pe_rc = _run_child_script(
-            pe_argv, cwd=repo_root, step_label="Platform engagement (o11y_platform_engagement_trends.py)"
-        )
-        if pe_json.is_file():
-            pe_data, pe_err = load_json_report(pe_json)
-            if pe_data is not None:
-                platform_engagement_report = pe_data
-                if not platform_engagement_report.get("error"):
-                    platform_engagement_step_ok = True
-                    nk = len(platform_engagement_report.get("kpis") or [])
-                    logger.info("Loaded platform engagement JSON OK (%s KPI series)", nk)
-                else:
-                    logger.warning(
-                        "Platform engagement JSON reports error: %s",
-                        platform_engagement_report.get("error"),
-                    )
-                if pe_rc != 0:
-                    logger.warning(
-                        "Platform engagement script exited %s — section may be partial or stale",
-                        pe_rc,
-                    )
-            else:
-                logger.error("Could not use platform engagement JSON: %s", pe_err)
-                logger.info("Continuing — Platform engagement section will show placeholder or error state")
-        else:
-            logger.error("Platform engagement script did not write JSON to %s", pe_json)
+        wave2_tasks.append(("Platform engagement (o11y_platform_engagement_trends.py)", pe_argv))
 
     if skip_im:
         logger.info("Skipping IM metrics usage (--skip-im or profile health_check_skip_im)")
@@ -1862,30 +1844,7 @@ def main() -> int:
         ]
         if im_top is not None:
             im_argv.extend(["--top", str(max(1, im_top))])
-        im_rc = _run_child_script(im_argv, cwd=repo_root, step_label="IM metrics usage (o11y_im_metrics_usage_breakdown.py)")
-        if im_json.is_file():
-            im_data, im_err = load_json_report(im_json)
-            if im_data is not None:
-                im_report = im_data
-                if not im_report.get("error") and (im_report.get("metrics") or []):
-                    im_step_ok = True
-                    n_im = len(im_report.get("metrics") or [])
-                    logger.info("Loaded IM metrics JSON OK (%s metric row(s))", n_im)
-                else:
-                    logger.warning(
-                        "IM metrics JSON has error or empty metrics: %s",
-                        im_report.get("error") or "empty",
-                    )
-                if im_rc != 0:
-                    logger.warning(
-                        "IM script exited %s — section may show error findings",
-                        im_rc,
-                    )
-            else:
-                logger.error("Could not use IM JSON: %s", im_err)
-                logger.info("Continuing — IM section will show check not executed or error state")
-        else:
-            logger.error("IM script did not write JSON to %s", im_json)
+        wave2_tasks.append(("IM metrics usage (o11y_im_metrics_usage_breakdown.py)", im_argv))
 
         int_argv = [
             str(_SCRIPT_DIR / "o11y_im_integrations.py"),
@@ -1895,29 +1854,7 @@ def main() -> int:
             str(im_int_json),
             *common,
         ]
-        int_rc = _run_child_script(int_argv, cwd=repo_root, step_label="IM integrations (o11y_im_integrations.py)")
-        if im_int_json.is_file():
-            int_data, int_err = load_json_report(im_int_json)
-            if int_data is not None:
-                im_integrations_report = int_data
-                if not im_integrations_report.get("error") and (im_integrations_report.get("integrations") or []):
-                    im_int_step_ok = True
-                    n_int = len(im_integrations_report.get("integrations") or [])
-                    logger.info("Loaded IM integrations JSON OK (%s integration(s))", n_int)
-                else:
-                    logger.warning(
-                        "IM integrations JSON has error or empty list: %s",
-                        im_integrations_report.get("error") or "empty",
-                    )
-                if int_rc != 0:
-                    logger.warning(
-                        "IM integrations script exited %s — section may show error findings",
-                        int_rc,
-                    )
-            else:
-                logger.error("Could not use IM integrations JSON: %s", int_err)
-        else:
-            logger.error("IM integrations script did not write JSON to %s", im_int_json)
+        wave2_tasks.append(("IM integrations (o11y_im_integrations.py)", int_argv))
 
     if skip_detectors:
         logger.info("Skipping detectors health check (--skip-detectors or profile health_check_skip_detectors)")
@@ -1943,7 +1880,217 @@ def main() -> int:
                 "--inactive-mts-max-evaluations",
                 str(inactive_mts_max_evaluations),
             ]
-        det_rc = _run_child_script(det_argv, cwd=repo_root, step_label="Detectors health (o11y_detectors_health_check.py)")
+        wave2_tasks.append(("Detectors health (o11y_detectors_health_check.py)", det_argv))
+
+    if skip_dashboards:
+        logger.info("Skipping dashboards health check (--skip-dashboards or profile health_check_skip_dashboards)")
+    else:
+        dash_argv = [
+            str(_SCRIPT_DIR / "o11y_dashboards_health_check.py"),
+            "--max-dashboards",
+            str(dashboards_max),
+            "--structured-json-out",
+            str(dash_json),
+            *common,
+        ]
+        wave2_tasks.append(("Dashboards health (o11y_dashboards_health_check.py)", dash_argv))
+
+    if skip_apm:
+        logger.info("Skipping APM health check (--skip-apm or profile health_check_skip_apm)")
+    else:
+        apm_argv = [
+            str(_SCRIPT_DIR / "o11y_apm_health_check.py"),
+            "--hours",
+            str(max(1, apm_hours)),
+            "--signalflow-max-data-points",
+            str(apm_sf_max_pts),
+            "--checks",
+            "all",
+            "--json-out",
+            str(apm_json),
+            *common,
+        ]
+        if apm_trace_checks:
+            apm_argv.append("--trace-checks")
+            logger.info("APM trace checks enabled (minimal_spans + large_span_sizes, etc.)")
+        else:
+            logger.info("APM trace checks disabled (faster run)")
+        wave2_tasks.append(("APM health (o11y_apm_health_check.py)", apm_argv))
+
+    if skip_rum:
+        logger.info("Skipping RUM health check (--skip-rum or profile health_check_skip_rum)")
+    else:
+        rum_argv = [
+            str(_SCRIPT_DIR / "o11y_rum_health_check.py"),
+            "--lookback-hours",
+            str(rum_lookback_h),
+            "--resolution-minutes",
+            str(rum_res_min),
+            "--max-rows",
+            str(rum_max_rows),
+            "--structured-json-out",
+            str(rum_json),
+            *common,
+        ]
+        wave2_tasks.append(("RUM health (o11y_rum_health_check.py)", rum_argv))
+
+    if skip_synthetics:
+        logger.info("Skipping Synthetics health check (--skip-synthetics or profile health_check_skip_synthetics)")
+    else:
+        syn_argv = [
+            str(_SCRIPT_DIR / "o11y_synthetics_health_check.py"),
+            "--max-tests",
+            str(synthetics_max_tests),
+            "--structured-json-out",
+            str(syn_json),
+            *common,
+        ]
+        if skip_synthetics_failure_metrics:
+            syn_argv.append("--skip-failure-metrics")
+        else:
+            syn_argv += [
+                "--failure-metrics-lookback-hours",
+                str(synthetics_failure_lookback_h),
+                "--failure-metrics-resolution-minutes",
+                str(synthetics_failure_res_min),
+                "--failing-rate-threshold-pct",
+                str(synthetics_failing_threshold_pct),
+            ]
+        wave2_tasks.append(("Synthetics health (o11y_synthetics_health_check.py)", syn_argv))
+
+    if skip_tokens:
+        logger.info("Skipping Token health check (--skip-tokens or profile health_check_skip_tokens)")
+    else:
+        tok_argv = [
+            str(_SCRIPT_DIR / "o11y_token_health_check.py"),
+            "--structured-json-out",
+            str(tok_json),
+            *common,
+        ]
+        wave2_tasks.append(("Token health (o11y_token_health_check.py)", tok_argv))
+
+    if skip_otel_collectors:
+        logger.info(
+            "Skipping OpenTelemetry Collectors check (--skip-otel-collectors or profile health_check_skip_otel_collectors)"
+        )
+    else:
+        otel_argv = [
+            str(_SCRIPT_DIR / "o11y_otel_collectors_health_check.py"),
+            "--lookback-hours",
+            str(otel_lookback_hours),
+            "--support-days",
+            str(otel_support_days),
+            "--structured-json-out",
+            str(otel_json),
+            *common,
+        ]
+        if otel_skip_github_catalog:
+            otel_argv.append("--skip-github-catalog")
+        wave2_tasks.append(("OpenTelemetry Collectors (o11y_otel_collectors_health_check.py)", otel_argv))
+
+    # Run all wave-2 tasks in parallel (each is an independent subprocess).
+    wave2_rc: dict[str, int] = {}
+    if wave2_tasks:
+        logger.info("▶ Wave 2: running %d steps in parallel", len(wave2_tasks))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(wave2_tasks)) as pool:
+            future_to_label = {
+                pool.submit(_run_child_script, argv, cwd=repo_root, step_label=label): label
+                for label, argv in wave2_tasks
+            }
+            for future in concurrent.futures.as_completed(future_to_label):
+                label = future_to_label[future]
+                try:
+                    wave2_rc[label] = future.result()
+                except Exception as exc:
+                    logger.error("▶ %s — raised unexpected exception: %s", label, exc)
+                    wave2_rc[label] = 127
+
+    # ── Load JSON results produced by wave-2 subprocesses ────────────────────────────────────
+    def _w2rc(label: str) -> int:
+        return wave2_rc.get(label, 0)
+
+    if not skip_platform_engagement:
+        pe_lbl = "Platform engagement (o11y_platform_engagement_trends.py)"
+        pe_rc = _w2rc(pe_lbl)
+        if pe_json.is_file():
+            pe_data, pe_err = load_json_report(pe_json)
+            if pe_data is not None:
+                platform_engagement_report = pe_data
+                if not platform_engagement_report.get("error"):
+                    platform_engagement_step_ok = True
+                    nk = len(platform_engagement_report.get("kpis") or [])
+                    logger.info("Loaded platform engagement JSON OK (%s KPI series)", nk)
+                else:
+                    logger.warning(
+                        "Platform engagement JSON reports error: %s",
+                        platform_engagement_report.get("error"),
+                    )
+                if pe_rc != 0:
+                    logger.warning(
+                        "Platform engagement script exited %s — section may be partial or stale",
+                        pe_rc,
+                    )
+            else:
+                logger.error("Could not use platform engagement JSON: %s", pe_err)
+                logger.info("Continuing — Platform engagement section will show placeholder or error state")
+        else:
+            logger.error("Platform engagement script did not write JSON to %s", pe_json)
+
+    if not skip_im:
+        im_lbl = "IM metrics usage (o11y_im_metrics_usage_breakdown.py)"
+        im_rc = _w2rc(im_lbl)
+        if im_json.is_file():
+            im_data, im_err = load_json_report(im_json)
+            if im_data is not None:
+                im_report = im_data
+                if not im_report.get("error") and (im_report.get("metrics") or []):
+                    im_step_ok = True
+                    n_im = len(im_report.get("metrics") or [])
+                    logger.info("Loaded IM metrics JSON OK (%s metric row(s))", n_im)
+                else:
+                    logger.warning(
+                        "IM metrics JSON has error or empty metrics: %s",
+                        im_report.get("error") or "empty",
+                    )
+                if im_rc != 0:
+                    logger.warning(
+                        "IM script exited %s — section may show error findings",
+                        im_rc,
+                    )
+            else:
+                logger.error("Could not use IM JSON: %s", im_err)
+                logger.info("Continuing — IM section will show check not executed or error state")
+        else:
+            logger.error("IM script did not write JSON to %s", im_json)
+
+        int_lbl = "IM integrations (o11y_im_integrations.py)"
+        int_rc = _w2rc(int_lbl)
+        if im_int_json.is_file():
+            int_data, int_err = load_json_report(im_int_json)
+            if int_data is not None:
+                im_integrations_report = int_data
+                if not im_integrations_report.get("error") and (im_integrations_report.get("integrations") or []):
+                    im_int_step_ok = True
+                    n_int = len(im_integrations_report.get("integrations") or [])
+                    logger.info("Loaded IM integrations JSON OK (%s integration(s))", n_int)
+                else:
+                    logger.warning(
+                        "IM integrations JSON has error or empty list: %s",
+                        im_integrations_report.get("error") or "empty",
+                    )
+                if int_rc != 0:
+                    logger.warning(
+                        "IM integrations script exited %s — section may show error findings",
+                        int_rc,
+                    )
+            else:
+                logger.error("Could not use IM integrations JSON: %s", int_err)
+        else:
+            logger.error("IM integrations script did not write JSON to %s", im_int_json)
+
+    if not skip_detectors:
+        det_lbl = "Detectors health (o11y_detectors_health_check.py)"
+        det_rc = _w2rc(det_lbl)
         if det_json.is_file():
             detectors_report, det_err = load_json_report(det_json)
             if detectors_report is not None:
@@ -1968,20 +2115,9 @@ def main() -> int:
         else:
             logger.error("Detectors script did not write JSON to %s", det_json)
 
-    if skip_dashboards:
-        logger.info("Skipping dashboards health check (--skip-dashboards or profile health_check_skip_dashboards)")
-    else:
-        dash_argv = [
-            str(_SCRIPT_DIR / "o11y_dashboards_health_check.py"),
-            "--max-dashboards",
-            str(dashboards_max),
-            "--structured-json-out",
-            str(dash_json),
-            *common,
-        ]
-        dash_rc = _run_child_script(
-            dash_argv, cwd=repo_root, step_label="Dashboards health (o11y_dashboards_health_check.py)"
-        )
+    if not skip_dashboards:
+        dash_lbl = "Dashboards health (o11y_dashboards_health_check.py)"
+        dash_rc = _w2rc(dash_lbl)
         if dash_json.is_file():
             dashboards_report, dash_err = load_json_report(dash_json)
             if dashboards_report is not None:
@@ -2006,28 +2142,9 @@ def main() -> int:
         else:
             logger.error("Dashboards script did not write JSON to %s", dash_json)
 
-    if skip_apm:
-        logger.info("Skipping APM health check (--skip-apm or profile health_check_skip_apm)")
-    else:
-        apm_argv = [
-            str(_SCRIPT_DIR / "o11y_apm_health_check.py"),
-            "--hours",
-            str(max(1, apm_hours)),
-            "--signalflow-max-data-points",
-            str(apm_sf_max_pts),
-            "--checks",
-            "all",
-            "--json-out",
-            str(apm_json),
-            *common,
-        ]
-        if apm_trace_checks:
-            apm_argv.append("--trace-checks")
-            logger.info("APM trace checks enabled (minimal_spans + large_span_sizes, etc.)")
-        else:
-            logger.info("APM trace checks disabled (faster run)")
-
-        apm_rc = _run_child_script(apm_argv, cwd=repo_root, step_label="APM health (o11y_apm_health_check.py)")
+    if not skip_apm:
+        apm_lbl = "APM health (o11y_apm_health_check.py)"
+        apm_rc = _w2rc(apm_lbl)
         if apm_json.is_file():
             apm_report, apm_err = load_json_report(apm_json)
             if apm_report is not None:
@@ -2045,22 +2162,9 @@ def main() -> int:
         else:
             logger.error("APM script did not write JSON to %s", apm_json)
 
-    if skip_rum:
-        logger.info("Skipping RUM health check (--skip-rum or profile health_check_skip_rum)")
-    else:
-        rum_argv = [
-            str(_SCRIPT_DIR / "o11y_rum_health_check.py"),
-            "--lookback-hours",
-            str(rum_lookback_h),
-            "--resolution-minutes",
-            str(rum_res_min),
-            "--max-rows",
-            str(rum_max_rows),
-            "--structured-json-out",
-            str(rum_json),
-            *common,
-        ]
-        rum_rc = _run_child_script(rum_argv, cwd=repo_root, step_label="RUM health (o11y_rum_health_check.py)")
+    if not skip_rum:
+        rum_lbl = "RUM health (o11y_rum_health_check.py)"
+        rum_rc = _w2rc(rum_lbl)
         if rum_json.is_file():
             rum_data, rum_err = load_json_report(rum_json)
             if rum_data is not None:
@@ -2086,29 +2190,9 @@ def main() -> int:
         else:
             logger.error("RUM script did not write JSON to %s", rum_json)
 
-    if skip_synthetics:
-        logger.info("Skipping Synthetics health check (--skip-synthetics or profile health_check_skip_synthetics)")
-    else:
-        syn_argv = [
-            str(_SCRIPT_DIR / "o11y_synthetics_health_check.py"),
-            "--max-tests",
-            str(synthetics_max_tests),
-            "--structured-json-out",
-            str(syn_json),
-            *common,
-        ]
-        if skip_synthetics_failure_metrics:
-            syn_argv.append("--skip-failure-metrics")
-        else:
-            syn_argv += [
-                "--failure-metrics-lookback-hours",
-                str(synthetics_failure_lookback_h),
-                "--failure-metrics-resolution-minutes",
-                str(synthetics_failure_res_min),
-                "--failing-rate-threshold-pct",
-                str(synthetics_failing_threshold_pct),
-            ]
-        syn_rc = _run_child_script(syn_argv, cwd=repo_root, step_label="Synthetics health (o11y_synthetics_health_check.py)")
+    if not skip_synthetics:
+        syn_lbl = "Synthetics health (o11y_synthetics_health_check.py)"
+        syn_rc = _w2rc(syn_lbl)
         if syn_json.is_file():
             synthetics_report, syn_err = load_json_report(syn_json)
             if synthetics_report is not None:
@@ -2132,16 +2216,9 @@ def main() -> int:
         else:
             logger.error("Synthetics script did not write JSON to %s", syn_json)
 
-    if skip_tokens:
-        logger.info("Skipping Token health check (--skip-tokens or profile health_check_skip_tokens)")
-    else:
-        tok_argv = [
-            str(_SCRIPT_DIR / "o11y_token_health_check.py"),
-            "--structured-json-out",
-            str(tok_json),
-            *common,
-        ]
-        tok_rc = _run_child_script(tok_argv, cwd=repo_root, step_label="Token health (o11y_token_health_check.py)")
+    if not skip_tokens:
+        tok_lbl = "Token health (o11y_token_health_check.py)"
+        tok_rc = _w2rc(tok_lbl)
         if tok_json.is_file():
             token_report, tok_err = load_json_report(tok_json)
             if token_report is not None:
@@ -2165,26 +2242,9 @@ def main() -> int:
         else:
             logger.error("Token health script did not write JSON to %s", tok_json)
 
-    if skip_otel_collectors:
-        logger.info(
-            "Skipping OpenTelemetry Collectors check (--skip-otel-collectors or profile health_check_skip_otel_collectors)"
-        )
-    else:
-        otel_argv = [
-            str(_SCRIPT_DIR / "o11y_otel_collectors_health_check.py"),
-            "--lookback-hours",
-            str(otel_lookback_hours),
-            "--support-days",
-            str(otel_support_days),
-            "--structured-json-out",
-            str(otel_json),
-            *common,
-        ]
-        if otel_skip_github_catalog:
-            otel_argv.append("--skip-github-catalog")
-        otel_rc = _run_child_script(
-            otel_argv, cwd=repo_root, step_label="OpenTelemetry Collectors (o11y_otel_collectors_health_check.py)"
-        )
+    if not skip_otel_collectors:
+        otel_lbl = "OpenTelemetry Collectors (o11y_otel_collectors_health_check.py)"
+        otel_rc = _w2rc(otel_lbl)
         if otel_json.is_file():
             otel_report, otel_err = load_json_report(otel_json)
             if otel_report is not None:
