@@ -1660,6 +1660,7 @@ function buildPlatformEngagementKpiDeck(payload) {
             ? "◆"
             : "—";
 
+    const isCustomMetricsTile = String(kpi.id || "").toLowerCase() === "custom_metrics";
     card.setAttribute("tabindex", "0");
     card.setAttribute("role", "button");
     card.setAttribute("aria-label", `Drill down: ${String(kpi.label || kpi.id || "KPI")}`);
@@ -1678,7 +1679,6 @@ function buildPlatformEngagementKpiDeck(payload) {
       ${err ? `<p class="pe-kpi-card__err">${escapeHtml(err.slice(0, 200))}</p>` : ""}
       <span class="pe-kpi-card__drill-hint" aria-hidden="true">${isCustomMetricsTile ? "View in IM table →" : "View breakdown →"}</span>
     `;
-    const isCustomMetricsTile = String(kpi.id || "").toLowerCase() === "custom_metrics";
     if (isCustomMetricsTile) {
       card.setAttribute("aria-label", `Drill down: ${String(kpi.label || kpi.id || "KPI")} — view Custom metrics in IM table`);
       const handler = () => peScrollToImCustomMetrics();
