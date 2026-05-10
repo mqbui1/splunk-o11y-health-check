@@ -1961,6 +1961,46 @@ details[open] .pe-drill-timeseries-summary::before {
   margin: 0.4rem 0 0;
 }
 
+/* ----- Custom metrics inline panel (injected into IM section) ----- */
+.pe-cm-inline-panel {
+  margin: 0 0 1.75rem;
+  border: 1px solid var(--splunk-border);
+  border-top: 3px solid var(--splunk-accent);
+  border-radius: var(--radius);
+  background: var(--splunk-card-bg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.pe-cm-inline-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem 0.85rem;
+  background: var(--splunk-page-bg);
+  border-bottom: 1px solid var(--splunk-border);
+}
+
+.pe-cm-inline-title {
+  margin: 0 0 0.2rem;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--splunk-text);
+}
+
+.pe-cm-inline-subtitle {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--splunk-text-subtle);
+  max-width: 56ch;
+}
+
+#pe-cm-inline-body {
+  padding: 1rem 1.25rem 1.25rem;
+}
+
 /* Credential fallback form */
 .pe-drill-cred-form {
   padding: 0.25rem 0;

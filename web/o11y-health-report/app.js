@@ -1089,30 +1089,75 @@ function peKpiIconSvg(kpiId, accent) {
 // ── Custom Metrics tile: scroll to IM table + filter to Custom ────────────────
 
 function peScrollToImCustomMetrics() {
-  // Find the Infrastructure monitoring section anchor
+  // Find the Infrastructure monitoring section article
   const allAnchors = [...document.querySelectorAll("article[id]")];
   const imAnchor = allAnchors.find((el) =>
     (el.querySelector("h2")?.textContent || "").toLowerCase().includes("infrastructure monitoring")
   ) || document.querySelector("[id^='sec-infrastructure']");
 
-  if (imAnchor) {
-    imAnchor.scrollIntoView({ behavior: "smooth", block: "start" });
-    // Sync sidebar active state
-    const id = imAnchor.id;
-    document.querySelectorAll(".sidebar-nav a").forEach((a) => {
-      a.classList.toggle("is-active", a.getAttribute("href") === `#${id}`);
-    });
+  // Inject or reveal the custom metrics panel inside the IM section
+  const PANEL_ID = "pe-cm-inline-panel";
+  let panel = document.getElementById(PANEL_ID);
+
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = PANEL_ID;
+    panel.className = "pe-cm-inline-panel";
+
+    // Insert before the first h3 in the section, or at the top of the section body
+    const sectionBody = imAnchor?.querySelector(".section-card__body") || imAnchor;
+    const firstH3 = sectionBody?.querySelector("h3");
+    if (firstH3) {
+      firstH3.before(panel);
+    } else if (sectionBody) {
+      sectionBody.prepend(panel);
+    } else {
+      // Fallback: insert after the IM pagination wrap
+      const allWraps = [...document.querySelectorAll(".table-pagination-wrap")];
+      const imWrap = allWraps.find((w) => w.querySelector("table") && isMetricCardinalityVolumeTable(w.querySelector("table")));
+      if (imWrap) imWrap.after(panel);
+    }
+
+    panel.innerHTML = `
+      <div class="pe-cm-inline-header">
+        <div>
+          <h3 class="pe-cm-inline-title">Custom metrics — full breakdown</h3>
+          <p class="pe-cm-inline-subtitle">All custom-billing-class metrics ranked by MTS volume. The summary table above only shows metrics ≥1% of org total; this panel fetches the complete list.</p>
+        </div>
+        <div class="pe-drill-cm-controls" style="margin-top:0">
+          <label class="pe-drill-cm-lookback-label" for="pe-cm-lookback">Lookback</label>
+          <select id="pe-cm-lookback" class="pe-drill-lookback-select">
+            <option value="P1D">1 day</option>
+            <option value="P7D" selected>7 days</option>
+            <option value="P30D">30 days</option>
+          </select>
+          <button class="btn pe-drill-load-btn" id="pe-cm-load-btn">Refresh</button>
+        </div>
+      </div>
+      <div id="pe-cm-inline-body"></div>`;
+
+    const loadBtn = panel.querySelector("#pe-cm-load-btn");
+    const lookbackSel = panel.querySelector("#pe-cm-lookback");
+    const body = panel.querySelector("#pe-cm-inline-body");
+
+    const doLoad = () => {
+      loadBtn.disabled = true;
+      peLoadCustomMetricsBreakdown(body, lookbackSel.value).finally(() => { loadBtn.disabled = false; });
+    };
+
+    loadBtn.addEventListener("click", doLoad);
+    // Auto-load immediately
+    doLoad();
   }
 
-  // Find the Metric Cardinality table's pagination wrap and apply filter
-  const wrap = document.querySelector(".table-pagination-wrap");
-  const allWraps = [...document.querySelectorAll(".table-pagination-wrap")];
-  const imWrap = allWraps.find((w) => {
-    const tbl = w.querySelector("table");
-    return tbl && isMetricCardinalityVolumeTable(tbl);
-  });
-  if (imWrap && typeof imWrap.__o11ySetBillingFilter === "function") {
-    imWrap.__o11ySetBillingFilter("Custom");
+  // Scroll to the panel (not the top of the section)
+  setTimeout(() => panel.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+
+  // Sync sidebar
+  if (imAnchor) {
+    document.querySelectorAll(".sidebar-nav a").forEach((a) => {
+      a.classList.toggle("is-active", a.getAttribute("href") === `#${imAnchor.id}`);
+    });
   }
 }
 
