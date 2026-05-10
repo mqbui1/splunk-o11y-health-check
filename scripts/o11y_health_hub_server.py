@@ -923,6 +923,77 @@ def create_app():
 
         return jsonify({"job": meta}), HTTPStatus.CREATED
 
+    @app.get("/api/drilldown/custom-metrics")
+    def drilldown_custom_metrics_direct():
+        """
+        Stateless custom-metrics drill-down: caller provides realm + token via header.
+        Used when job session has expired.
+        """
+        token = (request.headers.get("X-CM-Token") or "").strip()
+        realm = str(request.args.get("realm") or "us0").strip()
+        if not token:
+            return jsonify({"error": "X-CM-Token header required"}), HTTPStatus.BAD_REQUEST
+        if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$", realm):
+            return jsonify({"error": "invalid realm"}), HTTPStatus.BAD_REQUEST
+
+        lookback = str(request.args.get("lookback") or "P7D").strip().upper()
+        if lookback not in ("P1D", "P7D", "P30D"):
+            lookback = "P7D"
+        try:
+            limit = max(100, min(10000, int(request.args.get("limit") or "2000")))
+        except (ValueError, TypeError):
+            limit = 2000
+
+        import importlib
+        im_mod = importlib.import_module("o11y_im_metrics_usage_breakdown")
+
+        payload, err = im_mod.fetch_metrics_usage_payload(
+            token, realm,
+            lookback=lookback,
+            limit=limit,
+            billable=True,
+            order_by="-averageHourlyMtsCount",
+        )
+        if err:
+            return jsonify({"error": f"Usage API error: {err}"}), HTTPStatus.BAD_GATEWAY
+
+        rows = im_mod._extract_row_list(payload)
+        rows = im_mod._sort_rows(rows)
+        total_mts = sum(im_mod._mts_value(r) for r in rows)
+        custom_rows = []
+        for r in rows:
+            mname = im_mod._metric_name(r)
+            bc = im_mod._billing_class_from_row(r, mname)
+            if bc != "Custom":
+                continue
+            mts = im_mod._mts_value(r)
+            pct = (100.0 * mts / total_mts) if total_mts > 0 else 0.0
+            util = im_mod._utilization_from_row(r)
+            custom_rows.append({
+                "metricName": mname,
+                "utilization": util,
+                "averageHourlyMts": round(mts, 2),
+                "pctOfOrgTotal": round(pct, 4),
+            })
+        total_custom_mts = sum(r["averageHourlyMts"] for r in custom_rows)
+        for r in custom_rows:
+            r["pctOfCustomTotal"] = round(
+                100.0 * r["averageHourlyMts"] / total_custom_mts if total_custom_mts > 0 else 0.0, 4
+            )
+        util_summary: dict[str, float] = {}
+        for r in custom_rows:
+            util_summary[r["utilization"]] = util_summary.get(r["utilization"], 0) + r["averageHourlyMts"]
+
+        return jsonify({
+            "realm": realm,
+            "lookback": lookback,
+            "totalOrgMts": round(total_mts, 2),
+            "totalCustomMts": round(total_custom_mts, 2),
+            "customMetricCount": len(custom_rows),
+            "utilizationSummary": util_summary,
+            "metrics": custom_rows,
+        })
+
     @app.get("/api/jobs/<job_id>/drilldown/custom-metrics")
     def drilldown_custom_metrics(job_id: str):
         """

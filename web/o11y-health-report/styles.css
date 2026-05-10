@@ -1951,6 +1951,60 @@ details[open] .pe-drill-timeseries-summary::before {
   margin: 0.4rem 0 0;
 }
 
+/* Credential fallback form */
+.pe-drill-cred-form {
+  padding: 0.25rem 0;
+}
+
+.pe-drill-cred-note {
+  font-size: 0.8rem;
+  color: var(--splunk-text-muted);
+  margin: 0 0 0.75rem;
+}
+
+.pe-drill-cred-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.pe-drill-cred-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 1 1 140px;
+}
+
+.pe-drill-cred-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--splunk-text-muted);
+  letter-spacing: 0.03em;
+}
+
+.pe-drill-cred-input {
+  font-size: 0.82rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--splunk-border-strong);
+  border-radius: 6px;
+  background: var(--splunk-card-bg);
+  color: var(--splunk-text);
+  outline: none;
+}
+
+.pe-drill-cred-input:focus {
+  border-color: var(--pe-ring, var(--splunk-accent));
+  box-shadow: 0 0 0 2px var(--pe-soft, rgba(155,28,49,0.12));
+}
+
+.pe-drill-cred-hint {
+  font-size: 0.71rem;
+  color: var(--splunk-text-subtle);
+  font-style: italic;
+  margin: 0.4rem 0 0.5rem;
+}
+
 /* ----- Responsive ----- */
 @media (max-width: 900px) {
   .app-shell {
