@@ -1366,6 +1366,210 @@ a:focus-visible {
   line-height: 1.35;
 }
 
+.pe-kpi-card__footer {
+  margin-top: auto;
+  align-self: stretch;
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 0.5rem;
+}
+
+.pe-kpi-card__contributors {
+  margin: 0;
+  padding: 0.28rem 0.55rem;
+  border: 1px solid rgba(37, 99, 235, 0.35);
+  border-radius: 8px;
+  background: rgba(37, 99, 235, 0.06);
+  color: #1d4ed8;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.pe-kpi-card__contributors:hover {
+  background: rgba(37, 99, 235, 0.12);
+}
+
+.pe-kpi-card__contributors:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+/* Platform engagement KPI contributor overlay */
+.pe-drilldown-dialog {
+  max-width: min(720px, calc(100vw - 2rem));
+  width: 100%;
+  padding: 0;
+  border: 1px solid var(--splunk-border);
+  border-radius: 14px;
+  box-shadow: 0 22px 60px rgba(15, 23, 42, 0.28);
+  background: #fff;
+}
+
+.pe-drilldown-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.pe-drilldown-modal {
+  padding: 1.25rem 1.35rem 1.15rem;
+  max-height: min(85vh, 900px);
+  overflow: auto;
+}
+
+.pe-drilldown-modal__header {
+  text-align: center;
+  margin-bottom: 0.65rem;
+}
+
+.pe-drilldown-modal__title {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: var(--splunk-bg-dark);
+  letter-spacing: -0.02em;
+}
+
+.pe-drilldown-modal__delta-line {
+  margin: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.pe-drilldown-modal__delta-badge {
+  margin-top: 0;
+}
+
+.pe-drilldown-modal__spark {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 0.5rem;
+  color: var(--splunk-text-muted);
+}
+
+.pe-drilldown-modal__spark .pe-kpi-spark {
+  max-width: 220px;
+}
+
+.pe-drilldown-modal__values {
+  margin-bottom: 1rem;
+}
+
+.pe-drilldown-modal__values .pe-kpi-card__values {
+  margin-bottom: 0;
+}
+
+.pe-drilldown-modal__section {
+  margin-bottom: 1.1rem;
+}
+
+.pe-drilldown-modal__section--primary .pe-drilldown-modal__section-title {
+  color: var(--splunk-bg-dark);
+  font-size: 0.8125rem;
+}
+
+.pe-drilldown-modal__section-title {
+  margin: 0 0 0.45rem;
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--splunk-text-muted);
+}
+
+.pe-drilldown-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--splunk-border);
+  border-radius: 10px;
+}
+
+.pe-drilldown-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.pe-drilldown-table th,
+.pe-drilldown-table td {
+  padding: 0.45rem 0.55rem;
+  text-align: right;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.pe-drilldown-table th:first-child,
+.pe-drilldown-table td:first-child,
+.pe-drilldown-table__label {
+  text-align: left;
+  max-width: 14rem;
+  word-break: break-word;
+}
+
+.pe-drilldown-table th {
+  font-weight: 700;
+  background: rgba(15, 23, 42, 0.04);
+  color: var(--splunk-text-muted);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pe-drilldown-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.pe-drilldown-modal__method {
+  margin: 0.75rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--splunk-text-muted);
+}
+
+.pe-drilldown-modal__utc {
+  margin: 0.5rem 0 0;
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  color: var(--splunk-text-muted);
+}
+
+.pe-drilldown-modal__err {
+  margin: 0;
+  color: var(--status-critical);
+  font-size: 0.875rem;
+}
+
+.pe-drilldown-modal__empty {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--splunk-text-muted);
+}
+
+.pe-drilldown-modal__actions {
+  margin: 1rem 0 0;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.pe-drilldown-modal__close {
+  padding: 0.45rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--splunk-border);
+  background: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.pe-drilldown-modal__close:hover {
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.pe-drilldown-modal__close:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
 /* ----- Responsive ----- */
 @media (max-width: 900px) {
   .app-shell {

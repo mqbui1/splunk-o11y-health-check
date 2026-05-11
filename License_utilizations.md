@@ -50,7 +50,7 @@ Trace Volume:
 - sf.org.apm.numSpanBytesReceived
 
 Profiling Volume:
-- sf.org.profiling.numMessageBytesReceived (cumulative counter — **sum** series for org total, **delta** per interval, then **sum** deltas into each UTC month; not **mean** of the raw counter.)
+- sf.org.profiling.numMessageBytesReceived — health-check **usage** query matches **APM trace volume**: `data('…', rollup='rate').scale(60).mean()` at hourly execute resolution; Python = **mean of hourly point values** per UTC month (same profile keys as trace volume).
 
 ### Volume metrics and rollup types (Health Check automation)
 
@@ -58,11 +58,15 @@ Splunk assigns each metric a type (gauge, counter, cumulative counter). For **li
 
 | Kind | Example `sf.org` metrics | How to roll up over time for totals |
 | --- | --- | --- |
-| **Rate (bytes/sec)** | `sf.org.apm.numSpanBytesReceived` | Values are **bytes per second** per report interval. **Do not** average raw rates and treat the result as total bytes. Integrate: **sum over each month of (mean rate in bucket × bucket width in seconds)** to get **bytes received in that month** (repo default: multiplier **1**; optional profile/CLI scale only when verified). Compare to subscription as bytes (or MB). |
-| **Cumulative counter** | `sf.org.profiling.numMessageBytesReceived` | **Sum** across series, then **delta** per reporting interval; **sum** those deltas within each UTC month for total bytes (health-check automation: ``data('…').sum().delta()`` + ``monthly_sum``). |
+| **Rate-style usage (license script)** | `sf.org.apm.numSpanBytesReceived`, `sf.org.profiling.numMessageBytesReceived` | Health-check default: `data('…', rollup='rate').scale(60).mean()` at **hourly** execute resolution; Python stores the **mean of hourly point values** per UTC month (× optional `rate_integral_scale` on **trace volume** only). Profile: `license_apm_span_bytes_usage_resolution_hours` (fallback: `license_apm_span_bytes_cycle_resolution_hours`). Global `--resolution-hours` does not change this usage query. |
 | **Gauges** | `sf.org.apm.subscription.hosts`, `sf.org.apm.numHosts`, most `sf.org.apm.subscription.*` | **Mean** (or last) over the window is usually appropriate for subscription/capacity **counts**. |
 
-Trace volume (**numSpanBytesReceived**) is treated as a **rate** in Observability; profiling ingest is a **cumulative counter** — these are different shapes and are not interchangeable.
+**Trace volume** and **profiling ingest** usage rows share the same SignalFlow shape and monthly aggregation in automation; only the metric name (and trace subscription metric) differ.
+
+#### Trace volume — reconciling hourly/daily with Chart Builder **Mean(monthly)**
+
+- **Mean(monthly)** in the UI is a **platform aggregation** on `rollup='rate'` + **Scale:60**; it is **not** guaranteed to equal `Σ (point × Δt)` from raw execute streams unless the pipeline and **units** match exactly.
+- License automation uses the **arithmetic mean of hourly execute points** per UTC month (same unit as each point after `scale(60)`), which typically tracks the green bar within a small margin; `scripts/compare_apm_span_bytes_methods.py` still contrasts platform `mean(cycle='month',…)` vs hourly/daily means for spot checks.
 
 ---
 

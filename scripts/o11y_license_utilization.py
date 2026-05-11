@@ -9,17 +9,20 @@ Sources of truth:
 
 Approach:
   - Standalone stdlib script (no MCP). Uses POST https://stream.{realm}.signalfx.com/v2/signalflow/execute;
-    daily (or coarser) points are bucketed into **calendar months (UTC)** for tables.
+    hourly (default **1h**; override ``--resolution-hours``) points are bucketed into **calendar months (UTC)** for tables.
     (same family of API as server.py / Splunk SignalFlow docs).
   - **Single organization** — the access token identifies one org; no multi-org filters.
   - **License utilization only** (no throttle/diagnostic sf.org metrics).
   - One SignalFlow program per metric: data('<metric>').mean().publish() (or entitlement-specific
-    program) over a configurable window with daily resolution; Python aggregates points per calendar
-    month.     **Rate-typed byte metrics** (B/s) are integrated to bytes/month: sum(rate × bucket_seconds).
-    **Profiling ingest** is a cumulative counter: ``data(...).sum().delta()`` (org-wide total per bucket),
-    then **sum deltas per UTC month** (``usage_aggregate`` ``monthly_sum``).
+    program) over a configurable window with **1h** execute resolution by default; Python aggregates points per calendar
+    month. **APM trace volume** uses ``rollup='rate'``.scale(60) + ``mean()`` at **hourly** execute
+    resolution; Python stores the **arithmetic mean of hourly point values** per UTC calendar month
+    (``hourly_mean_month``; Chart Builder parity ~ ``Mean(monthly)``; × optional ``rate_integral_scale``).
+    **Profiling ingest** (``sf.org.profiling.numMessageBytesReceived``) uses the **same** program and Python
+    aggregation as **APM trace volume** (``rollup='rate'``.scale(60).``mean()`` + ``hourly_mean_month``); only the
+    metric name differs.
     Most gauges use mean of points per month; **RUM sessions** and **Synthetics run counts** use
-    ``data(...).sum()`` per bucket and **sum daily buckets per UTC month** (see ``usage_aggregate``).
+    ``data(...).sum()`` per bucket and **sum buckets per UTC month** (see ``usage_aggregate``).
     See LIMITATIONS in --help.
   - **Markdown output** includes **o11y-license-chart** JSON per entitlement (bars = usage, line = subscription);
     the HTML report viewer renders SVG charts after load.
@@ -166,12 +169,17 @@ class EntitlementSpec:
     display_values_as_mb: bool = False
     # ``mean``: average of rollup values (gauges) per month.
     # ``sum``: sum every usage point in the query window (legacy / rare; prefer ``monthly_sum`` for ``delta()``).
-    # ``monthly_sum``: sum usage points **within each UTC month** (daily session/run totals); headline
+    # ``monthly_sum``: sum usage points **within each UTC month** (RUM/Synthetics per-bucket totals); headline
     #    usage = mean of those monthly totals (matches Chart Builder monthly totals for RUM/Synthetics).
     # ``rate_integral``: each usage point is bytes **per second** (rate); sum(rate × bucket_seconds) per month.
+    # ``rate_mean_calendar_month``: mean of rate points in each UTC month × **full calendar seconds** in that month
+    #    × ``rate_integral_scale``.
+    # ``platform_cycle_month``: Splunk ``mean(cycle='month',…)`` output; one point per month; see
+    #    :func:`monthly_usage_from_platform_cycle_mean` (compare tooling / legacy).
+    # ``hourly_mean_month``: mean of execute values (e.g. hourly) within each UTC calendar month
+    #    (``apm_span_bytes`` after ``rollup='rate'``.scale(60).mean()).
     usage_aggregate: str = "mean"
-    # Multiply integrated rate before summing months (Chart Builder often applies **Scale: 60** on
-    # ``numSpanBytesReceived`` rate — raw SignalFlow may need the same factor to match UI MiB).
+    # Extra multiplier after SignalFlow (``apm_span_bytes``: ``hourly_mean_month`` / rate paths / legacy cycle).
     rate_integral_scale: float = 1.0
     # ``mean``: average subscription points per month (gauges). ``rate_integral``: subscription points
     # are B/s; sum(rate × bucket_seconds) per month to compare to integrated usage (rare — prefer ``mean``).
@@ -236,11 +244,11 @@ DEFAULT_ENTITLEMENTS: tuple[EntitlementSpec, ...] = (
         "sf.org.apm.subscription.spanBytes",
         "sf.org.apm.numSpanBytesReceived",
         display_values_as_mb=True,
-        # Org metrics expose trace bytes as a rate (B/s); mean() per bucket is avg B/s — integrate to bytes.
-        # Per License_utilizations.md: sum (mean_rate × bucket_seconds) per month. Default scale **1** (true B/s).
-        # If your Chart Builder pipeline applies an extra factor, set profile ``license_apm_span_bytes_rate_integral_scale``
-        # or ``--apm-span-bytes-rate-scale`` (e.g. ``60`` for legacy alignment — use only when verified).
-        usage_aggregate="rate_integral",
+        # Hourly buckets: B/min per point; Python = mean of points per UTC month (~ Chart Builder Mean(monthly)).
+        usage_program=(
+            "data('sf.org.apm.numSpanBytesReceived', rollup='rate').scale(60).mean().publish(label='usage')"
+        ),
+        usage_aggregate="hourly_mean_month",
         rate_integral_scale=1.0,
     ),
     EntitlementSpec(
@@ -249,13 +257,14 @@ DEFAULT_ENTITLEMENTS: tuple[EntitlementSpec, ...] = (
         "Profiling ingest",
         None,
         "sf.org.profiling.numMessageBytesReceived",
+        # Same SignalFlow + hourly_mean_month as apm_span_bytes; metric name only.
         usage_program=(
-            # Cumulative counter: sum across series for org total, then delta = bytes per rollup bucket.
-            "data('sf.org.profiling.numMessageBytesReceived').sum().delta().publish(label='usage')"
+            "data('sf.org.profiling.numMessageBytesReceived', rollup='rate').scale(60).mean().publish(label='usage')"
         ),
-        notes="Subscription allowance (bytes) is derived post-query from APM host/TAPM metrics per License_utilizations.md. Host model: Enterprise path 10.24 MB/host vs Standard 5.12 MB/host (subscription.containers/hosts ≈ 20 picks Enterprise path). See `profiling_derived` in JSON.",
+        notes="Profiling Ingest Subscription is estimated, if there is an add-on in your contract for this entitlement this may be wrong.",
         display_values_as_mb=True,
-        usage_aggregate="monthly_sum",
+        usage_aggregate="hourly_mean_month",
+        rate_integral_scale=1.0,
     ),
     # --- IM: hosts → containers → custom metrics (shared by host & container models) ---
     EntitlementSpec(
@@ -290,6 +299,7 @@ DEFAULT_ENTITLEMENTS: tuple[EntitlementSpec, ...] = (
         "sf.org.rum.numSessions",
         usage_program="data('sf.org.rum.numSessions').sum().publish(label='usage')",
         usage_aggregate="monthly_sum",
+        notes="Monthly usage = sum of bucket values in each **UTC** calendar month; global execute resolution (default **1h**). Kept as UTC to match Observability UI for most orgs (local-time months differ slightly).",
     ),
     EntitlementSpec(
         "rum_mms",
@@ -840,12 +850,131 @@ def month_key_utc(ts_ms: int) -> str:
     return f"{dt.year:04d}-{dt.month:02d}"
 
 
+def month_key_for_splunk_mean_monthly_plot(ts_ms: int) -> str:
+    """
+    Map a ``Mean(monthly)`` / ``mean(cycle='month',…)`` output timestamp to the **calendar month the value describes**.
+
+    In Splunk Observability Chart Builder, the monthly bar is often drawn at **UTC 00:00 on the 1st** of a month,
+    and that value summarizes the **previous** full calendar month (e.g. 1 May 00:00 → April).
+    """
+    dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+    # First hour of the 1st tolerates sub-second noise and 1h rollup buckets on month boundaries.
+    if dt.day == 1 and dt.hour == 0:
+        y, m = dt.year, dt.month
+        if m == 1:
+            return f"{y - 1}-12"
+        return f"{y}-{m - 1:02d}"
+    return month_key_utc(ts_ms)
+
+
+def extend_stop_ms_for_splunk_monthly_cycle(stop_ms: int) -> int:
+    """Push usage query stop past window end so Execute includes the next month-start boundary point."""
+    return int(stop_ms + 3 * 24 * 3600 * 1000)
+
+
+def _profile_positive_hours_first(
+    profile: dict[str, str],
+    keys: tuple[str, ...],
+    *,
+    default: int = 1,
+) -> int:
+    for k in keys:
+        raw = (profile.get(k) or "").strip()
+        if not raw:
+            continue
+        try:
+            return max(1, int(float(raw)))
+        except ValueError:
+            logger.warning("Invalid %s=%r — trying next / default %s", k, raw, default)
+    return default
+
+
+def apm_span_usage_hourly_resolution_ms(profile: dict[str, str]) -> int:
+    """Execute resolution for ``apm_span_bytes`` hourly mean path (hours); default 1h."""
+    hours = _profile_positive_hours_first(
+        profile,
+        (
+            "license_apm_span_bytes_usage_resolution_hours",
+            "license_apm_span_bytes_cycle_resolution_hours",
+        ),
+    )
+    return int(hours * 3600 * 1000)
+
+
+def apm_span_platform_cycle_resolution_ms(profile: dict[str, str]) -> int:
+    """Execute resolution for platform ``mean(cycle='month',…)`` comparisons (``compare_apm_span_bytes_methods``)."""
+    return apm_span_usage_hourly_resolution_ms(profile)
+
+
+def monthly_usage_from_platform_cycle_mean(
+    points: list[tuple[int, float]],
+    *,
+    scale: float = 1.0,
+) -> dict[str, float]:
+    """
+    One published value per completed calendar month (after ``mean(cycle='month',…)``).
+
+    Values are **not** integrated with bucket width — multiply only by ``scale`` (profile/CLI). Month keys use
+    :func:`month_key_for_splunk_mean_monthly_plot`.
+    """
+    s = float(scale) if scale == scale and scale else 1.0
+    deduped = _dedupe_ts_mean_points(points)
+    out: dict[str, float] = {}
+    for ts_ms, v in deduped:
+        m = month_key_for_splunk_mean_monthly_plot(ts_ms)
+        if m in out:
+            logger.warning("platform_cycle_month: duplicate month %s — overwriting", m)
+        out[m] = float(v) * s
+    return dict(sorted(out.items()))
+
+
+def _seconds_in_utc_month(month_label: str) -> int:
+    """Seconds in a full UTC calendar month (YYYY-MM)."""
+    s = (month_label or "").strip()
+    parts = [p for p in s.replace("/", "-").split("-") if p]
+    if len(parts) < 2:
+        raise ValueError(f"Invalid month label: {month_label!r}")
+    y, mo = int(parts[0]), int(parts[1])
+    if mo < 1 or mo > 12:
+        raise ValueError(f"Invalid month label: {month_label!r}")
+    days = calendar.monthrange(y, mo)[1]
+    return int(days * 24 * 3600)
+
+
+def _dedupe_ts_mean_points(points: list[tuple[int, float]]) -> list[tuple[int, float]]:
+    """One value per timestamp (mean) when execute merges multiple series at the same logical time."""
+    buckets: dict[int, list[float]] = {}
+    for ts_ms, v in points:
+        buckets.setdefault(int(ts_ms), []).append(float(v))
+    return sorted((ts, statistics.mean(vs)) for ts, vs in buckets.items())
+
+
 def monthly_mean_by_month(points: list[tuple[int, float]]) -> dict[str, float]:
     buckets: dict[str, list[float]] = {}
     for ts_ms, v in points:
         m = month_key_utc(ts_ms)
         buckets.setdefault(m, []).append(v)
     return {m: float(statistics.mean(vs)) for m, vs in sorted(buckets.items())}
+
+
+def monthly_mean_of_point_values_by_utc_month(
+    points: list[tuple[int, float]],
+    *,
+    scale: float = 1.0,
+) -> dict[str, float]:
+    """
+    Arithmetic **mean of execute values** per UTC calendar month (no ×Δt, no integration).
+
+    Use when comparing to Chart Builder **Mean(monthly)**-style summaries on the same unit scale as each point.
+    ``scale`` multiplies each monthly mean (e.g. ``rate_integral_scale`` for ``apm_span_bytes``).
+    """
+    s = float(scale) if scale == scale and scale else 1.0
+    deduped = _dedupe_ts_mean_points(points)
+    buckets: dict[str, list[float]] = {}
+    for ts_ms, v in deduped:
+        m = month_key_utc(ts_ms)
+        buckets.setdefault(m, []).append(float(v))
+    return {mo: float(statistics.mean(vs)) * s for mo, vs in sorted(buckets.items())}
 
 
 def monthly_bytes_from_rate_points(
@@ -857,9 +986,10 @@ def monthly_bytes_from_rate_points(
     """
     Integrate **bytes per second** over each resolution bucket to **bytes per calendar month**.
 
-    Each SignalFlow point is the mean rate (B/s) over ``resolution_ms``; contribution is
-    ``rate_mean × scale × (resolution_ms / 1000)`` bytes. Values are summed per UTC month.
-    ``scale`` defaults to **1** for true B/s. Use a profile/CLI override only when a verified pipeline factor applies.
+    Each SignalFlow point is averaged over ``resolution_ms``; contribution is
+    ``value × scale × (resolution_ms / 1000)`` bytes. Values are summed per UTC month.
+    For ``apm_span_bytes``, the program applies ``rollup='rate'`` and ``scale(60)``; ``scale`` here defaults to **1**
+    (profile/CLI override only when a verified extra factor applies).
     """
     if resolution_ms <= 0:
         raise ValueError("resolution_ms must be positive")
@@ -872,13 +1002,41 @@ def monthly_bytes_from_rate_points(
     return {mo: buckets[mo] for mo in sorted(buckets.keys())}
 
 
+def monthly_bytes_from_mean_rate_calendar_month(
+    points: list[tuple[int, float]],
+    *,
+    scale: float = 1.0,
+) -> dict[str, float]:
+    """
+    APM-style monthly trace bytes: **mean** of rate samples in each UTC month × **full calendar seconds**
+    in that month × ``scale``.
+
+    Aligns with “monthly average of snapshots” style billing: the mean is taken over all rollup buckets
+    that fall in the month (after deduping duplicate timestamps). ``scale`` is ``rate_integral_scale``
+    (profile/CLI) for ``apm_span_bytes``.
+    """
+    s = float(scale) if scale == scale and scale else 1.0
+    deduped = _dedupe_ts_mean_points(points)
+    buckets: dict[str, list[float]] = {}
+    for ts_ms, v in deduped:
+        m = month_key_utc(ts_ms)
+        buckets.setdefault(m, []).append(float(v))
+    out: dict[str, float] = {}
+    for m, vs in sorted(buckets.items()):
+        sec = _seconds_in_utc_month(m)
+        out[m] = statistics.mean(vs) * s * float(sec)
+    return out
+
+
 def entitlement_rate_integral_scale_effective(
     spec: EntitlementSpec,
     profile: dict[str, str],
     apm_span_bytes_cli_scale: float | None,
 ) -> float:
     """
-    Multiplier passed to :func:`monthly_bytes_from_rate_points` for ``usage_aggregate == "rate_integral"``.
+    Multiplier for ``apm_span_bytes``: scales integrated rates (``rate_*``), multiplies
+    ``hourly_mean_month`` monthly means, or legacy platform ``mean(cycle='month',…)`` values
+    (``platform_cycle_month``).
 
     ``apm_span_bytes`` alone accepts profile ``license_apm_span_bytes_rate_integral_scale`` and
     ``--apm-span-bytes-rate-scale`` (CLI wins).
@@ -1421,12 +1579,12 @@ def main() -> int:
         epilog="""
 LIMITATIONS (read before customer-facing claims):
   - Billing uses contract-specific averaging (e.g. monthly averages, 1-minute snapshots for APM).
-    Window and monthly cells use mean of SignalFlow points (daily by default) — a directional estimate.
-  - **APM trace volume** (``sf.org.apm.numSpanBytesReceived``): monthly usage is
-    ``sum(mean_rate × rate_integral_scale × bucket_seconds)`` where ``mean_rate`` is treated as **bytes/s** in each
-    SignalFlow bucket. Default **scale = 1** (see ``License_utilizations.md``). Override with profile
-    ``license_apm_span_bytes_rate_integral_scale`` or ``--apm-span-bytes-rate-scale`` only when you have verified a
-    pipeline-specific factor (legacy examples used ``60`` — do not assume).
+    Window and monthly cells use mean of SignalFlow points (**1h** execute resolution by default) — a directional estimate.
+  - **APM trace volume** (``sf.org.apm.numSpanBytesReceived``): ``rollup='rate'``.scale(60) + ``mean()`` at **hourly**
+    execute resolution (profile: ``license_apm_span_bytes_usage_resolution_hours``, fallback
+    ``license_apm_span_bytes_cycle_resolution_hours``); Python stores the **mean of hourly values** per UTC month
+    (× ``rate_integral_scale``). Aligns closely with Chart Builder **Mean(monthly)**; use ``compare_apm_span_bytes_methods.py``
+    to contrast platform cycle vs hourly mean.
   - Monthly tables list **completed UTC months only** (the in-progress month is omitted). JSON stores **raw bytes**;
     span/profiling **tables and charts** label amounts as **MiB** (bytes ÷ 1 048 576). Profiling allowance still uses
     decimal **MB** multipliers from ``License_utilizations.md`` internally (e.g. 10.24 MB/host × 1 000 000 → bytes).
@@ -1434,10 +1592,12 @@ LIMITATIONS (read before customer-facing claims):
   - Some metrics may be absent on trials, partial SKUs, or renamed; rows show error/no data.
   - IM host vs container usage use sf.org.numResourcesMonitored with resourceType host vs container (License_utilizations.md).
   - **RUM** (``sf.org.rum.numSessions``) and **Synthetics** (``synthetics.run.count``) usage: org-wide
-    ``sum()`` per rollup bucket, then **sum of daily buckets per UTC month**; row headline usage is the
-    mean of those monthly totals. Synthetics uptime combines ``http`` and ``port`` test types with ``sum()``.
-  - **Profiling** (``sf.org.profiling.numMessageBytesReceived``): ``sum().delta()`` for org-wide bytes
-    per bucket, then **sum deltas per UTC month** (``monthly_sum``); not ``mean()`` of the raw counter.
+    ``sum()`` per rollup bucket, then **sum of buckets per UTC month** (not local timezone); default **1h**
+    resolution usually matches the platform UI. Row headline usage is the mean of those monthly totals.
+    Synthetics uptime combines ``http`` and ``port`` test types with ``sum()``.
+  - **Profiling** (``sf.org.profiling.numMessageBytesReceived``): **same** usage program and ``hourly_mean_month``
+    math as **APM trace volume** (``rollup='rate'``.scale(60).``mean()``); hourly execute resolution from
+    ``license_apm_span_bytes_usage_resolution_hours`` (fallback ``license_apm_span_bytes_cycle_resolution_hours``).
 
 References:
   - License_utilizations.md (metric names)
@@ -1468,7 +1628,7 @@ References:
         metavar="YYYY-MM-DD",
         help="UTC end of license window (inclusive); requires --start-date",
     )
-    p.add_argument("--resolution-hours", type=int, default=24, help="SignalFlow resolution in hours (default 24)")
+    p.add_argument("--resolution-hours", type=int, default=1, help="SignalFlow resolution in hours (default 1)")
     p.add_argument(
         "--realm",
         default=None,
@@ -1510,9 +1670,8 @@ References:
         type=float,
         default=None,
         metavar="N",
-        help="Override APM trace volume integration multiplier for sf.org.apm.numSpanBytesReceived (default from "
-        "entitlement is 1.0 = B/s × bucket width). Profile key license_apm_span_bytes_rate_integral_scale applies "
-        "when this flag is omitted.",
+        help="Override APM trace volume scale (default 1.0): multiplies hourly monthly means, legacy cycle monthly "
+        "values, or rate-integration paths. Profile key license_apm_span_bytes_rate_integral_scale applies when omitted.",
     )
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose logging on stderr.")
     args = p.parse_args()
@@ -1636,13 +1795,15 @@ References:
         max_pts,
     )
 
+    has_fixed_window = bool(start_d and end_d)
+
     for spec in specs:
         eff_rate_scale = entitlement_rate_integral_scale_effective(
             spec, profile, args.apm_span_bytes_rate_scale
         )
         if spec.key == "apm_span_bytes" and eff_rate_scale != float(spec.rate_integral_scale):
             logger.info(
-                "apm_span_bytes: monthly integration uses rate_integral_scale=%s (see --apm-span-bytes-rate-scale / profile)",
+                "apm_span_bytes: monthly scale factor rate_integral_scale=%s (see --apm-span-bytes-rate-scale / profile)",
                 eff_rate_scale,
             )
         row: dict[str, Any] = {
@@ -1656,17 +1817,36 @@ References:
             "usage_program": spec.usage_program,
             "display_values_as_mb": spec.display_values_as_mb,
             "usage_aggregate": spec.usage_aggregate,
-            "rate_integral_scale": eff_rate_scale if spec.usage_aggregate == "rate_integral" else spec.rate_integral_scale,
+            "rate_integral_scale": eff_rate_scale
+            if spec.usage_aggregate
+            in (
+                "rate_integral",
+                "rate_mean_calendar_month",
+                "platform_cycle_month",
+                "hourly_mean_month",
+            )
+            else spec.rate_integral_scale,
             "subscription_aggregate": spec.subscription_aggregate,
         }
         u_prog = spec.program_usage()
+        usage_stop_ms = stop_ms
+        usage_resolution_ms = resolution_ms
+        if spec.usage_aggregate == "hourly_mean_month":
+            usage_resolution_ms = apm_span_usage_hourly_resolution_ms(profile)
+        elif spec.key == "apm_span_bytes" and spec.usage_aggregate == "platform_cycle_month":
+            usage_resolution_ms = apm_span_platform_cycle_resolution_ms(profile)
+            if has_fixed_window:
+                usage_stop_ms = extend_stop_ms_for_splunk_monthly_cycle(stop_ms)
+                logger.info(
+                    "apm_span_bytes: usage query stop extended (+3d) to include Mean(monthly) boundary datapoint"
+                )
         u_pts, u_err = execute_signalflow_time_series(
             stream_url=stream_url,
             token=token,
             program=u_prog,
             start_ms=start_ms,
-            stop_ms=stop_ms,
-            resolution_ms=resolution_ms,
+            stop_ms=usage_stop_ms,
+            resolution_ms=usage_resolution_ms,
             wall_seconds=wall_s,
             read_timeout=read_to,
             max_points=max_pts,
@@ -1693,6 +1873,24 @@ References:
                 u_by_month = monthly_bytes_from_rate_points(
                     u_pts,
                     resolution_ms,
+                    scale=float(eff_rate_scale),
+                )
+                agg_u = aggregate_values(list(u_by_month.values()))
+            elif spec.usage_aggregate == "rate_mean_calendar_month":
+                u_by_month = monthly_bytes_from_mean_rate_calendar_month(
+                    u_pts,
+                    scale=float(eff_rate_scale),
+                )
+                agg_u = aggregate_values(list(u_by_month.values()))
+            elif spec.usage_aggregate == "platform_cycle_month":
+                u_by_month = monthly_usage_from_platform_cycle_mean(
+                    u_pts,
+                    scale=float(eff_rate_scale),
+                )
+                agg_u = aggregate_values(list(u_by_month.values()))
+            elif spec.usage_aggregate == "hourly_mean_month":
+                u_by_month = monthly_mean_of_point_values_by_utc_month(
+                    u_pts,
                     scale=float(eff_rate_scale),
                 )
                 agg_u = aggregate_values(list(u_by_month.values()))

@@ -110,7 +110,7 @@ Review utilization trends and subscription alignment for this entitlement; adjus
 
 #### Entitlement: Profiling ingest
 
-*Subscription allowance (bytes) is derived post-query from APM host/TAPM metrics per License_utilizations.md. Host model: Enterprise path 10.24 MB/host vs Standard 5.12 MB/host (subscription.containers/hosts ≈ 20 picks Enterprise path). See `profiling_derived` in JSON.*
+*Profiling Ingest Subscription is estimated, if there is an add-on in your contract for this entitlement this may be wrong.*
 
 | Color | YYYY-MM | Subscription (MB) | Utilization (MB) | Utilization % |
 | --- | --- | --- | --- | --- |
