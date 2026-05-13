@@ -1190,6 +1190,271 @@ function peScrollToImCustomMetrics() {
   }
 }
 
+// ── Metricset (MMS / TMS) breakdown panel ─────────────────────────────────────
+
+/**
+ * Create and inject the MMS/TMS breakdown panel into `sectionBodyEl`.
+ * Idempotent — safe to call multiple times.  Returns the panel element.
+ */
+function peInjectMetricsetPanel(sectionBodyEl) {
+  const PANEL_ID = "pe-ms-inline-panel";
+  let panel = document.getElementById(PANEL_ID);
+  if (panel) return panel;
+
+  panel = document.createElement("div");
+  panel.id = PANEL_ID;
+  panel.className = "pe-ms-inline-panel";
+
+  if (sectionBodyEl) {
+    sectionBodyEl.prepend(panel);
+  } else {
+    const anchor = [...document.querySelectorAll("article[id]")].find((el) =>
+      isApmSectionTitle(el.querySelector("h2")?.textContent || "")
+    );
+    const sectionBody = anchor?.querySelector(".section-card__body") || anchor;
+    if (sectionBody) sectionBody.prepend(panel);
+  }
+
+  const hasJob = !!new URLSearchParams(window.location.search).get("hubJob");
+
+  const lookbackControlHtml = hasJob
+    ? ``
+    : `<label class="pe-drill-cm-lookback-label" for="pe-ms-hours">Window</label>
+       <select id="pe-ms-hours" class="pe-drill-lookback-select">
+         <option value="1" selected>1 hour</option>
+         <option value="6">6 hours</option>
+         <option value="24">24 hours</option>
+       </select>`;
+
+  panel.innerHTML = `
+    <div class="pe-cm-inline-header">
+      <div>
+        <h3 class="pe-cm-inline-title">MetricSet breakdown by service &amp; environment</h3>
+        <p class="pe-cm-inline-subtitle">Monitoring MetricSet (MMS) and Troubleshooting MetricSet (TMS) counts per service and deployment environment, fetched live via SignalFlow.</p>
+      </div>
+      <div class="pe-drill-cm-controls" style="margin-top:0">
+        ${lookbackControlHtml}
+        <button class="btn pe-drill-load-btn" id="pe-ms-load-btn">Load</button>
+      </div>
+    </div>
+    <div id="pe-ms-inline-body"></div>`;
+
+  const loadBtn = panel.querySelector("#pe-ms-load-btn");
+  const hoursSel = panel.querySelector("#pe-ms-hours");
+  const body = panel.querySelector("#pe-ms-inline-body");
+
+  const doLoad = () => {
+    loadBtn.textContent = "Refresh";
+    loadBtn.disabled = true;
+    const hours = parseInt(hoursSel ? hoursSel.value : "1", 10) || 1;
+    peLoadMetricsetBreakdown(body, hours).finally(() => { loadBtn.disabled = false; });
+  };
+
+  loadBtn.addEventListener("click", doLoad);
+  if (hoursSel) hoursSel.addEventListener("change", doLoad);
+
+  if (hasJob) {
+    doLoad();
+  } else {
+    peShowMetricsetCredentialForm(body, 1, null);
+  }
+
+  return panel;
+}
+
+function peShowMetricsetCredentialForm(container, hours, realm) {
+  container.innerHTML = `
+    <div class="pe-drill-cred-form">
+      <p class="pe-drill-cred-desc">Enter your Splunk Observability org access token to load MetricSet data live.</p>
+      <div class="pe-drill-cred-row">
+        <input class="pe-drill-cred-input" id="pe-ms-realm-input" type="text" placeholder="Realm (e.g. us0)" value="${escapeHtml(realm || _peOrgRealm || "us0")}" style="width:80px" autocomplete="off" />
+        <input class="pe-drill-cred-input" id="pe-ms-token-input" type="password" placeholder="Access token" style="width:240px" autocomplete="off" />
+        <button class="btn pe-drill-load-btn" id="pe-ms-cred-submit">Load</button>
+      </div>
+      <p class="pe-drill-cred-hint">Token is sent only to your local hub server and never stored.</p>
+    </div>`;
+
+  const errEl = document.createElement("p");
+  errEl.className = "pe-drill-fetch-error";
+  errEl.style.display = "none";
+  container.querySelector(".pe-drill-cred-form").appendChild(errEl);
+
+  document.getElementById("pe-ms-cred-submit").addEventListener("click", async () => {
+    const r = (document.getElementById("pe-ms-realm-input")?.value || "us0").trim();
+    const t = (document.getElementById("pe-ms-token-input")?.value || "").trim();
+    if (!t) { errEl.textContent = "Token is required."; errEl.style.display = ""; return; }
+    errEl.style.display = "none";
+    _peOrgToken = t;
+    _peOrgRealm = r;
+    container.innerHTML = `<div class="pe-drill-loading"><span class="pe-drill-spinner"></span> Loading…</div>`;
+    await peLoadMetricsetBreakdownDirect(container, hours, r, t);
+  });
+}
+
+async function peLoadMetricsetBreakdownDirect(container, hours, realm, token) {
+  _peOrgToken = token;
+  _peOrgRealm = realm;
+  try {
+    const resp = await fetch(
+      `/api/drilldown/metricsets?hours=${encodeURIComponent(hours)}&realm=${encodeURIComponent(realm)}`,
+      { method: "GET", headers: { "X-CM-Token": token } }
+    );
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      const isAuthErr = resp.status === 401 || /401|invalid token|unauthorized/i.test(data.error || "");
+      if (isAuthErr) {
+        _peOrgToken = "";
+        peShowMetricsetCredentialForm(container, hours, realm);
+      } else {
+        container.innerHTML = `<p class="pe-drill-fetch-error">Error: ${escapeHtml(data.error || `HTTP ${resp.status}`)}</p>`;
+      }
+      return;
+    }
+    peRenderMetricsetData(container, data);
+  } catch (e) {
+    container.innerHTML = `<p class="pe-drill-fetch-error">Request failed: ${escapeHtml(String(e))}</p>`;
+  }
+}
+
+async function peLoadMetricsetBreakdown(container, hours) {
+  const jobId = new URLSearchParams(window.location.search).get("hubJob") || "";
+  if (!jobId) {
+    if (_peOrgToken) {
+      return peLoadMetricsetBreakdownDirect(container, hours, _peOrgRealm, _peOrgToken);
+    }
+    peShowMetricsetCredentialForm(container, hours, null);
+    return;
+  }
+
+  container.innerHTML = `<div class="pe-drill-loading"><span class="pe-drill-spinner"></span> Loading…</div>`;
+
+  try {
+    const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/drilldown/metricsets?hours=${encodeURIComponent(hours)}`);
+    const data = await resp.json();
+    if (resp.status === 401 && data.error === "token_required") {
+      if (_peOrgToken) {
+        return peLoadMetricsetBreakdownDirect(container, hours, data.realm || _peOrgRealm, _peOrgToken);
+      }
+      peShowMetricsetCredentialForm(container, hours, data.realm || "us0");
+      return;
+    }
+    if (!resp.ok || data.error) {
+      const isAuthErr = resp.status === 401 || /401|invalid token|unauthorized/i.test(data.error || "");
+      if (isAuthErr) {
+        _peOrgToken = "";
+        peShowMetricsetCredentialForm(container, hours, data.realm || _peOrgRealm);
+      } else {
+        container.innerHTML = `<p class="pe-drill-fetch-error">Error: ${escapeHtml(data.error || `HTTP ${resp.status}`)}</p>`;
+      }
+      return;
+    }
+    peRenderMetricsetData(container, data);
+  } catch (e) {
+    container.innerHTML = `<p class="pe-drill-fetch-error">Request failed: ${escapeHtml(String(e))}</p>`;
+  }
+}
+
+function peRenderMetricsetData(container, data) {
+  const { rows = [], totalMms = 0, totalTms = 0, orgMms = 0, orgTms = 0, hours = 1 } = data;
+
+  // Collect unique environments for filter tabs
+  const allEnvs = [...new Set(rows.map((r) => r.environment || "unknown").filter(Boolean))].sort();
+
+  const envTabsHtml = allEnvs.length > 1
+    ? `<div class="pe-ms-env-tabs">
+        <button class="pe-ms-env-tab pe-ms-env-tab--active" data-env="">All environments</button>
+        ${allEnvs.map((e) => `<button class="pe-ms-env-tab" data-env="${escapeHtml(e)}">${escapeHtml(e)}</button>`).join("")}
+       </div>`
+    : "";
+
+  container.innerHTML = `
+    <div class="pe-drill-cm-summary">
+      <div class="pe-drill-cm-stat">
+        <span class="pe-drill-cm-stat-num">${escapeHtml(formatPeScalarDisplay(orgMms))}</span>
+        <span class="pe-drill-cm-stat-label">Org MMS (avg)</span>
+      </div>
+      <div class="pe-drill-cm-stat">
+        <span class="pe-drill-cm-stat-num">${escapeHtml(formatPeScalarDisplay(orgTms))}</span>
+        <span class="pe-drill-cm-stat-label">Org TMS (avg)</span>
+      </div>
+      <div class="pe-drill-cm-stat">
+        <span class="pe-drill-cm-stat-num">${escapeHtml(String(rows.length))}</span>
+        <span class="pe-drill-cm-stat-label">Services</span>
+      </div>
+      <div class="pe-drill-cm-stat">
+        <span class="pe-drill-cm-stat-num">${escapeHtml(String(hours))}</span>
+        <span class="pe-drill-cm-stat-label">Hour window</span>
+      </div>
+    </div>
+    ${envTabsHtml}
+    <div class="pe-cm-table-wrap">
+      <table class="pe-drill-table pe-ms-table" id="pe-ms-data-table">
+        <thead>
+          <tr>
+            <th class="sortable" data-sort="service">Service<span class="pe-sort-arrow">⇅</span></th>
+            <th class="sortable" data-sort="environment">Environment<span class="pe-sort-arrow">⇅</span></th>
+            <th class="sortable" data-sort="mms">MMS<span class="pe-sort-arrow">▼</span></th>
+            <th class="sortable" data-sort="tms">TMS<span class="pe-sort-arrow">⇅</span></th>
+          </tr>
+        </thead>
+        <tbody id="pe-ms-tbody"></tbody>
+      </table>
+    </div>`;
+
+  const tbody = container.querySelector("#pe-ms-tbody");
+  let _activeEnv = "";
+
+  function renderRows() {
+    const filtered = _activeEnv ? rows.filter((r) => (r.environment || "unknown") === _activeEnv) : rows;
+    tbody.innerHTML = filtered.map((r) => `
+      <tr>
+        <td>${escapeHtml(r.service || "—")}</td>
+        <td><span class="pe-ms-env-badge">${escapeHtml(r.environment || "unknown")}</span></td>
+        <td class="pe-ms-num">${escapeHtml(formatPeScalarDisplay(r.mms))}</td>
+        <td class="pe-ms-num">${escapeHtml(formatPeScalarDisplay(r.tms))}</td>
+      </tr>`).join("") || `<tr><td colspan="4" class="pe-ms-empty">No data for this filter.</td></tr>`;
+  }
+
+  renderRows();
+
+  // Environment filter tabs
+  container.querySelectorAll(".pe-ms-env-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _activeEnv = btn.dataset.env || "";
+      container.querySelectorAll(".pe-ms-env-tab").forEach((b) =>
+        b.classList.toggle("pe-ms-env-tab--active", b.dataset.env === _activeEnv)
+      );
+      renderRows();
+    });
+  });
+
+  // Column sort
+  container.querySelectorAll(".pe-ms-table th.sortable").forEach((th) => {
+    th.addEventListener("click", () => {
+      const col = th.dataset.sort;
+      const isNum = col === "mms" || col === "tms";
+      const currentDir = th.dataset.dir || "desc";
+      const nextDir = currentDir === "desc" ? "asc" : "desc";
+      th.dataset.dir = nextDir;
+      rows.sort((a, b) => {
+        const av = isNum ? (a[col] || 0) : String(a[col] || "");
+        const bv = isNum ? (b[col] || 0) : String(b[col] || "");
+        if (isNum) return nextDir === "asc" ? av - bv : bv - av;
+        return nextDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+      });
+      container.querySelectorAll(".pe-ms-table th.sortable .pe-sort-arrow").forEach((a) => { a.textContent = "⇅"; });
+      th.querySelector(".pe-sort-arrow").textContent = nextDir === "asc" ? "▲" : "▼";
+      renderRows();
+    });
+  });
+}
+
+/** True if the section title refers to the APM section. */
+function isApmSectionTitle(title) {
+  const t = (title || "").trim().toLowerCase();
+  return t.includes("application performance") || t === "apm" || t.includes("apm health");
+}
+
 // ── Platform engagement KPI drill-down modal ─────────────────────────────────
 
 /**
@@ -3530,6 +3795,9 @@ async function buildUI() {
     paginateMetricCardinalityTables(bodyEl);
     if (sec.title.trim().toLowerCase().includes("infrastructure monitoring")) {
       peInjectCustomMetricsPanel(bodyEl);
+    }
+    if (isApmSectionTitle(sec.title)) {
+      peInjectMetricsetPanel(bodyEl);
     }
     paginateAnalyzeIntegrationsTables(bodyEl);
     paginateDetectorHealthTables(bodyEl);

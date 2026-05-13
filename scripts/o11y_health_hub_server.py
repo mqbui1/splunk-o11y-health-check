@@ -1251,6 +1251,178 @@ def create_app():
             return jsonify({"error": err}), HTTPStatus.BAD_GATEWAY
         return jsonify({"metric": metric_name, "services": services, "environments": environments})
 
+    # ── MetricSet breakdown (MMS / TMS by service + environment) ─────────────
+
+    def _run_metricset_breakdown(token: str, realm: str, hours: int = 1) -> tuple[dict, str | None]:
+        """
+        Run SignalFlow for MMS + TMS org metrics broken down by sf_service + sf_environment.
+        Returns ({rows, totals, ...}, error_str | None).
+        """
+        import importlib as _imp
+
+        try:
+            apm_mod = _imp.import_module("o11y_apm_health_check")
+            sf_collect = apm_mod.signalflow_matrix_collect
+        except Exception as e:
+            return {}, f"Cannot import apm module: {e}"
+
+        stream_url = f"https://stream.{realm}.signalfx.com"
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - hours * 3600 * 1000
+        resolution_ms = 60_000  # 1-min rollup
+
+        # (service, env) -> {mms, tms}
+        results: dict[tuple, dict] = {}
+
+        for metric_key, label in [
+            ("sf.org.apm.numMonitoringMetricSets", "mms"),
+            ("sf.org.apm.numTroubleshootingMetricSets", "tms"),
+        ]:
+            program = (
+                f"data('{metric_key}')"
+                ".mean(by=['sf_service','sf_environment'])"
+                f".publish(label='{label}')"
+            )
+            try:
+                meta, pts, err, _ = sf_collect(
+                    stream_url=stream_url,
+                    token=token,
+                    program=program,
+                    start_ms=start_ms,
+                    stop_ms=now_ms,
+                    resolution_ms=resolution_ms,
+                    wall_seconds=30.0,
+                    read_timeout=30.0,
+                    max_data_points=20_000,
+                )
+            except Exception as e:
+                return {}, f"SignalFlow error for {metric_key}: {e}"
+            if err:
+                return {}, f"SignalFlow error for {metric_key}: {err}"
+
+            # Average value per tsid across all time buckets
+            tsid_vals: dict[str, list[float]] = {}
+            for pt in pts:
+                tsid_vals.setdefault(pt["tsId"], []).append(pt["value"])
+
+            for tsid, vals in tsid_vals.items():
+                props = meta.get(tsid, {})
+                svc = str(props.get("sf_service") or props.get("service") or "unknown")
+                env = str(props.get("sf_environment") or props.get("environment") or "unknown")
+                key = (svc, env)
+                if key not in results:
+                    results[key] = {"service": svc, "environment": env, "mms": 0.0, "tms": 0.0}
+                results[key][label] = round(sum(vals) / len(vals), 1)
+
+        rows = sorted(results.values(), key=lambda r: -(r["mms"] + r["tms"]))
+        total_mms = round(sum(r["mms"] for r in rows), 1)
+        total_tms = round(sum(r["tms"] for r in rows), 1)
+
+        # Org-level totals (no by-dimension — single series per metric)
+        org_mms, org_tms = total_mms, total_tms
+        for metric_key, field in [
+            ("sf.org.apm.numMonitoringMetricSets", "org_mms"),
+            ("sf.org.apm.numTroubleshootingMetricSets", "org_tms"),
+        ]:
+            program = f"data('{metric_key}').mean().publish(label='v')"
+            try:
+                _, pts, _, _ = sf_collect(
+                    stream_url=stream_url,
+                    token=token,
+                    program=program,
+                    start_ms=start_ms,
+                    stop_ms=now_ms,
+                    resolution_ms=resolution_ms,
+                    wall_seconds=20.0,
+                    read_timeout=20.0,
+                    max_data_points=500,
+                )
+                if pts:
+                    vals2 = [p["value"] for p in pts]
+                    v = round(sum(vals2) / len(vals2), 1)
+                    if field == "org_mms":
+                        org_mms = v
+                    else:
+                        org_tms = v
+            except Exception:
+                pass
+
+        return {
+            "rows": rows,
+            "totalMms": total_mms,
+            "totalTms": total_tms,
+            "orgMms": org_mms,
+            "orgTms": org_tms,
+            "hours": hours,
+            "realm": realm,
+            "rowCount": len(rows),
+        }, None
+
+    def _load_job_credentials(job_id: str) -> tuple[str, str]:
+        """Return (token, realm) from a job's ephemeral profile + meta.json. token='' if unavailable."""
+        job_dir = JOBS_ROOT / job_id
+        realm = "us0"
+        token = ""
+        meta_path = job_dir / "meta.json"
+        if meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                realm = str(meta.get("realm") or "us0").strip()
+            except Exception:
+                pass
+        profile_path = job_dir / "_ephemeral_profile.yaml"
+        if profile_path.is_file():
+            try:
+                import yaml as _yaml  # type: ignore[import-untyped]
+            except ImportError:
+                _yaml = None
+            try:
+                raw = profile_path.read_text(encoding="utf-8")
+                prof = _yaml.safe_load(raw) if _yaml else {}
+                token = str(prof.get("access_token") or "").strip()
+                if prof.get("realm"):
+                    realm = str(prof["realm"]).strip()
+            except Exception:
+                pass
+        if not token:
+            token = (request.headers.get("X-CM-Token") or "").strip()
+        return token, realm
+
+    @app.get("/api/drilldown/metricsets")
+    def drilldown_metricsets_direct():
+        """Stateless: MMS + TMS breakdown by service + environment. Token via X-CM-Token header."""
+        token = (request.headers.get("X-CM-Token") or "").strip()
+        realm = str(request.args.get("realm") or "us0").strip()
+        if not token:
+            return jsonify({"error": "token_required", "realm": realm}), HTTPStatus.UNAUTHORIZED
+        if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$", realm):
+            return jsonify({"error": "invalid realm"}), HTTPStatus.BAD_REQUEST
+        try:
+            hours = max(1, min(24, int(request.args.get("hours") or "1")))
+        except (ValueError, TypeError):
+            hours = 1
+        data, err = _run_metricset_breakdown(token, realm, hours=hours)
+        if err:
+            return jsonify({"error": err}), HTTPStatus.BAD_GATEWAY
+        return jsonify(data)
+
+    @app.get("/api/jobs/<job_id>/drilldown/metricsets")
+    def drilldown_metricsets(job_id: str):
+        """Job-bound: MMS + TMS breakdown by service + environment using stored credentials."""
+        if not _safe_job_id(job_id):
+            return jsonify({"error": "invalid id"}), HTTPStatus.BAD_REQUEST
+        token, realm = _load_job_credentials(job_id)
+        if not token:
+            return jsonify({"error": "token_required", "realm": realm}), HTTPStatus.UNAUTHORIZED
+        try:
+            hours = max(1, min(24, int(request.args.get("hours") or "1")))
+        except (ValueError, TypeError):
+            hours = 1
+        data, err = _run_metricset_breakdown(token, realm, hours=hours)
+        if err:
+            return jsonify({"error": err}), HTTPStatus.BAD_GATEWAY
+        return jsonify(data)
+
     @app.delete("/api/jobs/<job_id>")
     def delete_job(job_id: str):
         if not _safe_job_id(job_id):

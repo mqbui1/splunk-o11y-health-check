@@ -2099,6 +2099,113 @@ th.sort-asc .pe-sort-arrow, th.sort-desc .pe-sort-arrow { opacity: 1; }
 }
 .pe-cm-token-banner-msg { color: var(--splunk-text-muted, #8b95a1); }
 
+/* ----- MetricSet (MMS/TMS) inline panel (injected into APM section) ----- */
+.pe-ms-inline-panel {
+  margin: 0 0 1.75rem;
+  border: 1px solid var(--splunk-border);
+  border-top: 3px solid #0d9488;
+  border-radius: var(--radius);
+  background: var(--splunk-card-bg);
+  box-shadow: var(--shadow);
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+#pe-ms-inline-body {
+  padding: 1rem 1.25rem 1.25rem;
+}
+
+/* Environment filter tabs */
+.pe-ms-env-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.75rem 0 0.5rem;
+}
+
+.pe-ms-env-tab {
+  padding: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid var(--splunk-border-strong);
+  border-radius: 9999px;
+  background: transparent;
+  color: var(--splunk-text-muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.pe-ms-env-tab:hover {
+  background: var(--splunk-hover-bg, rgba(255,255,255,0.07));
+  color: var(--splunk-text);
+}
+
+.pe-ms-env-tab--active {
+  background: rgba(13,148,136,0.15);
+  border-color: #0d9488;
+  color: #0d9488;
+}
+
+/* MMS/TMS table */
+.pe-ms-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.pe-ms-table th,
+.pe-ms-table td {
+  padding: 0.42rem 0.7rem;
+  border-bottom: 1px solid var(--splunk-border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.pe-ms-table thead th {
+  background: var(--splunk-page-bg);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--splunk-text-muted);
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.pe-ms-table thead th:hover {
+  background: var(--splunk-hover-bg, rgba(255,255,255,0.05));
+}
+
+.pe-ms-table tbody tr:last-child td { border-bottom: none; }
+.pe-ms-table tbody tr:hover td { background: var(--splunk-hover-bg, rgba(255,255,255,0.04)); }
+
+.pe-ms-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--splunk-text);
+}
+
+.pe-ms-env-badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: rgba(13,148,136,0.12);
+  color: #0d9488;
+  white-space: nowrap;
+}
+
+.pe-ms-empty {
+  text-align: center;
+  color: var(--splunk-text-subtle);
+  padding: 1.5rem 0;
+  font-style: italic;
+}
+
 /* ----- Custom metrics inline panel (injected into IM section) ----- */
 .pe-cm-inline-panel {
   margin: 0 0 1.75rem;
