@@ -368,10 +368,9 @@ a:focus-visible {
   border-radius: var(--radius-lg);
   margin-bottom: 1.5rem;
   box-shadow: var(--shadow);
-  overflow: hidden;
+  overflow: visible;
   transition: box-shadow 0.2s ease;
 }
-
 .section-card:hover {
   box-shadow: 0 2px 6px rgba(17, 9, 22, 0.06), 0 8px 28px rgba(17, 9, 22, 0.06);
 }
@@ -1952,6 +1951,35 @@ details[open] .pe-drill-timeseries-summary::before {
 
 .pe-drill-cm-table {
   font-size: 0.78rem;
+  width: 100%;
+  table-layout: auto;
+}
+
+/* Column header tooltips */
+.pe-th-tip {
+  cursor: default;
+  border-bottom: 1px dashed var(--splunk-text-muted, #8b95a1);
+}
+#pe-col-tooltip {
+  position: fixed;
+  background: #f8fafc;
+  color: #1e293b;
+  border: 1px solid #cbd5e1;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  padding: 6px 10px;
+  border-radius: 5px;
+  white-space: normal;
+  width: 220px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  pointer-events: none;
+  z-index: 9999;
+  display: none;
+}
+.pe-drill-cm-table th:nth-child(2),
+.pe-drill-cm-table td:nth-child(2) {
+  min-width: 140px;
+  white-space: nowrap;
 }
 
 .pe-drill-more-note {
@@ -1961,6 +1989,116 @@ details[open] .pe-drill-timeseries-summary::before {
   margin: 0.4rem 0 0;
 }
 
+.pe-cm-table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 1.25rem 0 0.5rem;
+  flex-wrap: wrap;
+}
+.pe-cm-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.pe-cm-filter-label {
+  font-size: 0.8rem;
+  color: var(--splunk-text-muted, #8b95a1);
+  white-space: nowrap;
+}
+.pe-cm-lookback-fixed {
+  font-size: 0.78rem;
+  color: var(--splunk-text-muted, #8b95a1);
+  font-style: italic;
+}
+.pe-cm-row-count {
+  font-size: 0.8rem;
+  color: var(--splunk-text-muted, #8b95a1);
+}
+.pe-cm-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  /* Ensure all ancestors allow this to scroll */
+  position: relative;
+}
+
+/* Sortable column headers */
+.pe-drill-cm-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.pe-drill-cm-table th.sortable:hover { background: var(--splunk-hover-bg, rgba(255,255,255,0.05)); }
+.pe-sort-arrow { margin-left: 4px; opacity: 0.4; font-size: 0.7rem; }
+th.sort-asc .pe-sort-arrow, th.sort-desc .pe-sort-arrow { opacity: 1; }
+
+/* Pagination controls */
+.pe-cm-pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  font-size: 0.78rem;
+  border-top: 1px solid var(--splunk-border);
+  flex-wrap: wrap;
+}
+.pe-cm-pagination button {
+  padding: 2px 8px;
+  border: 1px solid var(--splunk-border);
+  border-radius: 3px;
+  background: var(--splunk-card-bg);
+  color: var(--splunk-text);
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+.pe-cm-pagination button:disabled { opacity: 0.4; cursor: default; }
+.pe-cm-pagination button:not(:disabled):hover { background: var(--splunk-hover-bg, rgba(255,255,255,0.07)); }
+.pe-cm-page-info { color: var(--splunk-text-muted, #8b95a1); }
+.pe-cm-page-size-label { color: var(--splunk-text-muted, #8b95a1); margin-left: auto; }
+.pe-cm-page-size-select { font-size: 0.75rem; padding: 1px 4px; }
+.pe-cm-usage-cell { white-space: nowrap; }
+.pe-cm-usage-tag {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-right: 2px;
+}
+.pe-cm-usage-tag--det  { background: #3b82f620; color: #3b82f6; }
+.pe-cm-usage-tag--ac   { background: #22c55e20; color: #22c55e; }
+.pe-cm-usage-tag--ic   { background: #f9731620; color: #f97316; }
+.pe-cm-usage-tag--api  { background: #eab30820; color: #ca8a04; }
+.pe-cm-usage-none { color: var(--splunk-text-muted, #8b95a1); }
+
+/* ----- Metric services / environments columns ----- */
+.pe-cm-svc-cell, .pe-cm-env-cell { white-space: normal; width: 160px; max-width: 160px; word-break: break-word; }
+.pe-cm-svc-tag {
+  display: inline-block;
+  background: var(--splunk-accent, #5b75e0);
+  color: #fff;
+  font-size: 0.72rem;
+  padding: 1px 6px;
+  border-radius: 10px;
+  margin: 1px 2px 1px 0;
+  white-space: nowrap;
+}
+.pe-cm-svc-mts { opacity: 0.75; font-size: 0.68rem; }
+.pe-cm-svc-total { font-size: 0.68rem; color: var(--splunk-text-muted, #8b95a1); margin-top: 3px; }
+.pe-cm-svc-empty { color: var(--splunk-text-muted, #8b95a1); }
+.pe-cm-svc-loading { color: var(--splunk-text-muted, #8b95a1); font-size: 0.8rem; }
+.pe-cm-env-tag { background: #2e7d52 !important; }
+.pe-cm-token-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: var(--splunk-surface-raised, #f8f9fa);
+  border: 1px solid var(--splunk-border);
+  border-radius: var(--radius, 4px);
+  margin-bottom: 0.75rem;
+  font-size: 0.82rem;
+}
+.pe-cm-token-banner-msg { color: var(--splunk-text-muted, #8b95a1); }
+
 /* ----- Custom metrics inline panel (injected into IM section) ----- */
 .pe-cm-inline-panel {
   margin: 0 0 1.75rem;
@@ -1969,7 +2107,9 @@ details[open] .pe-drill-timeseries-summary::before {
   border-radius: var(--radius);
   background: var(--splunk-card-bg);
   box-shadow: var(--shadow);
-  overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .pe-cm-inline-header {

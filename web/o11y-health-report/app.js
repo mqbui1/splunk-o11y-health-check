@@ -1086,74 +1086,103 @@ function peKpiIconSvg(kpiId, accent) {
   return `<svg class="pe-kpi-icon-svg" viewBox="0 0 24 24" width="28" height="28" aria-hidden="true" style="color:${accent}">${path}</svg>`;
 }
 
-// ── Custom Metrics tile: scroll to IM table + filter to Custom ────────────────
+// ── Custom Metrics panel: inject live breakdown, replacing the static IM table ─
 
-function peScrollToImCustomMetrics() {
-  // Find the Infrastructure monitoring section article
-  const allAnchors = [...document.querySelectorAll("article[id]")];
-  const imAnchor = allAnchors.find((el) =>
-    (el.querySelector("h2")?.textContent || "").toLowerCase().includes("infrastructure monitoring")
-  ) || document.querySelector("[id^='sec-infrastructure']");
-
-  // Inject or reveal the custom metrics panel inside the IM section
+/**
+ * Create and inject the live custom-metrics panel into `sectionBodyEl` (the IM
+ * section's .markdown-body).  Idempotent — safe to call multiple times.
+ * Returns the panel element.
+ */
+function peInjectCustomMetricsPanel(sectionBodyEl) {
   const PANEL_ID = "pe-cm-inline-panel";
   let panel = document.getElementById(PANEL_ID);
+  if (panel) return panel;
 
-  if (!panel) {
-    panel = document.createElement("div");
-    panel.id = PANEL_ID;
-    panel.className = "pe-cm-inline-panel";
+  // Find and remove the static cardinality table within this section
+  const allWraps = sectionBodyEl
+    ? [...sectionBodyEl.querySelectorAll(".table-pagination-wrap")]
+    : [...document.querySelectorAll(".table-pagination-wrap")];
+  const imWrap = allWraps.find((w) => {
+    const t = w.querySelector("table");
+    return t && isMetricCardinalityVolumeTable(t);
+  });
 
-    // Insert before the first h3 in the section, or at the top of the section body
-    const sectionBody = imAnchor?.querySelector(".section-card__body") || imAnchor;
-    const firstH3 = sectionBody?.querySelector("h3");
-    if (firstH3) {
-      firstH3.before(panel);
-    } else if (sectionBody) {
-      sectionBody.prepend(panel);
-    } else {
-      // Fallback: insert after the IM pagination wrap
-      const allWraps = [...document.querySelectorAll(".table-pagination-wrap")];
-      const imWrap = allWraps.find((w) => w.querySelector("table") && isMetricCardinalityVolumeTable(w.querySelector("table")));
-      if (imWrap) imWrap.after(panel);
-    }
+  panel = document.createElement("div");
+  panel.id = PANEL_ID;
+  panel.className = "pe-cm-inline-panel";
 
-    panel.innerHTML = `
-      <div class="pe-cm-inline-header">
-        <div>
-          <h3 class="pe-cm-inline-title">Custom metrics — full breakdown</h3>
-          <p class="pe-cm-inline-subtitle">All custom-billing-class metrics ranked by MTS volume. The summary table above only shows metrics ≥1% of org total; this panel fetches the complete list.</p>
-        </div>
-        <div class="pe-drill-cm-controls" style="margin-top:0">
-          <label class="pe-drill-cm-lookback-label" for="pe-cm-lookback">Lookback</label>
-          <select id="pe-cm-lookback" class="pe-drill-lookback-select">
-            <option value="P1D">1 day</option>
-            <option value="P7D" selected>7 days</option>
-            <option value="P30D">30 days</option>
-          </select>
-          <button class="btn pe-drill-load-btn" id="pe-cm-load-btn">Refresh</button>
-        </div>
-      </div>
-      <div id="pe-cm-inline-body"></div>`;
-
-    const loadBtn = panel.querySelector("#pe-cm-load-btn");
-    const lookbackSel = panel.querySelector("#pe-cm-lookback");
-    const body = panel.querySelector("#pe-cm-inline-body");
-
-    const doLoad = () => {
-      loadBtn.disabled = true;
-      peLoadCustomMetricsBreakdown(body, lookbackSel.value).finally(() => { loadBtn.disabled = false; });
-    };
-
-    loadBtn.addEventListener("click", doLoad);
-    // Auto-load immediately
-    doLoad();
+  if (imWrap) {
+    imWrap.before(panel);
+    imWrap.remove();
+  } else if (sectionBodyEl) {
+    sectionBodyEl.prepend(panel);
+  } else {
+    const imAnchorFb = [...document.querySelectorAll("article[id]")].find((el) =>
+      (el.querySelector("h2")?.textContent || "").toLowerCase().includes("infrastructure monitoring")
+    );
+    const sectionBody = imAnchorFb?.querySelector(".section-card__body") || imAnchorFb;
+    if (sectionBody) sectionBody.prepend(panel);
   }
 
-  // Scroll to the panel (not the top of the section)
+  const hasJob = !!new URLSearchParams(window.location.search).get("hubJob");
+
+  // When hub job is active, lookback comes from the report — no user control.
+  // When standalone, let the user pick.
+  const lookbackControlHtml = hasJob
+    ? ``
+    : `<label class="pe-drill-cm-lookback-label" for="pe-cm-lookback">Lookback</label>
+       <select id="pe-cm-lookback" class="pe-drill-lookback-select">
+         <option value="P1D">1 day</option>
+         <option value="P7D" selected>7 days</option>
+         <option value="P30D">30 days</option>
+       </select>`;
+
+  panel.innerHTML = `
+    <div class="pe-cm-inline-header">
+      <div>
+        <h3 class="pe-cm-inline-title">MTS full breakdown</h3>
+        <p class="pe-cm-inline-subtitle">All metrics fetched live from the Usage Analytics API, ranked by MTS volume. Filter by billing class using the dropdown.</p>
+      </div>
+      <div class="pe-drill-cm-controls" style="margin-top:0">
+        ${lookbackControlHtml}
+        <button class="btn pe-drill-load-btn" id="pe-cm-load-btn">Load</button>
+      </div>
+    </div>
+    <div id="pe-cm-inline-body"></div>`;
+
+  const loadBtn = panel.querySelector("#pe-cm-load-btn");
+  const lookbackSel = panel.querySelector("#pe-cm-lookback");
+  const body = panel.querySelector("#pe-cm-inline-body");
+
+  const doLoad = (lookback) => {
+    loadBtn.textContent = "Refresh";
+    loadBtn.disabled = true;
+    const lb = lookback || (lookbackSel ? lookbackSel.value : "P7D");
+    peLoadCustomMetricsBreakdown(body, lb).finally(() => { loadBtn.disabled = false; });
+  };
+
+  loadBtn.addEventListener("click", () => doLoad());
+  if (lookbackSel) lookbackSel.addEventListener("change", () => doLoad());
+
+  if (hasJob) {
+    doLoad();
+  } else {
+    peShowCredentialForm(body, "P7D", null);
+  }
+
+  return panel;
+}
+
+function peScrollToImCustomMetrics() {
+  const panel = peInjectCustomMetricsPanel(null);
+
+  // Scroll to the panel
   setTimeout(() => panel.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
 
-  // Sync sidebar
+  // Sync sidebar to IM section
+  const imAnchor = [...document.querySelectorAll("article[id]")].find((el) =>
+    (el.querySelector("h2")?.textContent || "").toLowerCase().includes("infrastructure monitoring")
+  ) || document.querySelector("[id^='sec-infrastructure']");
   if (imAnchor) {
     document.querySelectorAll(".sidebar-nav a").forEach((a) => {
       a.classList.toggle("is-active", a.getAttribute("href") === `#${imAnchor.id}`);
@@ -1262,18 +1291,27 @@ function peDrilldownTableHtml(pts, label, acc) {
     </div>`;
 }
 
+// Module-level token store — shared between credential form and services fetcher
+let _peOrgToken = "";
+let _peOrgRealm = "us0";
+
 /**
  * Fetch the custom-metrics breakdown from the hub API and render it into `container`.
  * Only available when the report was loaded via the hub (hubJob param in URL).
  */
-function peShowCredentialForm(container, lookback, lookbackSel) {
+function peShowCredentialForm(container, lookback, realmHint) {
+  // Try to infer realm from the hint, page data attribute, or URL param
+  const inferredRealm = realmHint ||
+    document.documentElement.dataset.realm ||
+    new URLSearchParams(window.location.search).get("realm") || "us0";
+
   container.innerHTML = `
     <div class="pe-drill-cred-form">
-      <p class="pe-drill-cred-note">The job session has expired. Enter your credentials to load the breakdown directly.</p>
+      <p class="pe-drill-cred-note">Enter your org access token to load the full custom metrics breakdown from the Usage Analytics API.</p>
       <div class="pe-drill-cred-row">
         <div class="pe-drill-cred-field">
           <label class="pe-drill-cred-label" for="pe-drill-realm-input">Realm</label>
-          <input id="pe-drill-realm-input" class="pe-drill-cred-input" type="text" placeholder="us0" value="us0" />
+          <input id="pe-drill-realm-input" class="pe-drill-cred-input" type="text" placeholder="us0" value="${escapeHtml(inferredRealm)}" />
         </div>
         <div class="pe-drill-cred-field" style="flex:2">
           <label class="pe-drill-cred-label" for="pe-drill-token-input">Org access token</label>
@@ -1281,21 +1319,28 @@ function peShowCredentialForm(container, lookback, lookbackSel) {
         </div>
         <button class="btn pe-drill-load-btn" id="pe-drill-cred-submit">Load</button>
       </div>
-      <p class="pe-drill-cred-hint">Token is used only for this request and never stored.</p>
-      <div id="pe-drill-cred-result"></div>
+      <p class="pe-drill-cred-hint">Token is sent only to your local hub server and never stored.</p>
     </div>`;
+
+  const errEl = document.createElement("p");
+  errEl.className = "pe-drill-fetch-error";
+  errEl.style.display = "none";
+  container.querySelector(".pe-drill-cred-form").appendChild(errEl);
 
   document.getElementById("pe-drill-cred-submit").addEventListener("click", async () => {
     const realm = (document.getElementById("pe-drill-realm-input")?.value || "us0").trim();
     const token = (document.getElementById("pe-drill-token-input")?.value || "").trim();
-    if (!token) { document.getElementById("pe-drill-cred-result").innerHTML = `<p class="pe-drill-fetch-error">Token is required.</p>`; return; }
-    const resultEl = document.getElementById("pe-drill-cred-result");
-    resultEl.innerHTML = `<div class="pe-drill-loading"><span class="pe-drill-spinner"></span> Loading…</div>`;
-    await peLoadCustomMetricsBreakdownDirect(resultEl, lookback, realm, token);
+    if (!token) { errEl.textContent = "Token is required."; errEl.style.display = ""; return; }
+    errEl.style.display = "none";
+    container.innerHTML = `<div class="pe-drill-loading"><span class="pe-drill-spinner"></span> Loading…</div>`;
+    await peLoadCustomMetricsBreakdownDirect(container, lookback, realm, token);
   });
 }
 
 async function peLoadCustomMetricsBreakdownDirect(container, lookback, realm, token) {
+  // Store at module level so the services fetcher can reuse without asking again
+  _peOrgToken = token;
+  _peOrgRealm = realm;
   try {
     const resp = await fetch(`/api/drilldown/custom-metrics?lookback=${encodeURIComponent(lookback)}&limit=2000&realm=${encodeURIComponent(realm)}`, {
       method: "GET",
@@ -1303,46 +1348,73 @@ async function peLoadCustomMetricsBreakdownDirect(container, lookback, realm, to
     });
     const data = await resp.json();
     if (!resp.ok || data.error) {
-      container.innerHTML = `<p class="pe-drill-fetch-error">API error: ${escapeHtml(data.error || `HTTP ${resp.status}`)}</p>`;
+      const isAuthErr = resp.status === 401 || /401|invalid token|unauthorized/i.test(data.error || "");
+      if (isAuthErr) {
+        _peOrgToken = "";
+        peShowCredentialForm(container, lookback, realm);
+      } else {
+        container.innerHTML = `<p class="pe-drill-fetch-error">Error: ${escapeHtml(data.error || `HTTP ${resp.status}`)}</p>`;
+      }
       return;
     }
-    peRenderCustomMetricsData(container, data);
+    peRenderCustomMetricsData(container, data, "");
   } catch (e) {
     container.innerHTML = `<p class="pe-drill-fetch-error">Request failed: ${escapeHtml(String(e))}</p>`;
   }
 }
 
 async function peLoadCustomMetricsBreakdown(container, lookback) {
-  const params = new URLSearchParams(window.location.search);
-  const jobId = params.get("hubJob") || "";
+  const jobId = new URLSearchParams(window.location.search).get("hubJob") || "";
   if (!jobId) {
-    peShowCredentialForm(container, lookback, null);
+    // If we already have a token from a previous form entry, go direct without re-prompting
+    if (_peOrgToken) {
+      return peLoadCustomMetricsBreakdownDirect(container, lookback, _peOrgRealm, _peOrgToken);
+    }
+    peShowCredentialForm(container, lookback);
     return;
   }
 
-  container.innerHTML = `<div class="pe-drill-loading"><span class="pe-drill-spinner"></span> Loading metric breakdown from Usage Analytics API…</div>`;
+  container.innerHTML = `<div class="pe-drill-loading"><span class="pe-drill-spinner"></span> Loading…</div>`;
 
   try {
     const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/drilldown/custom-metrics?lookback=${encodeURIComponent(lookback)}&limit=2000`);
     const data = await resp.json();
-    if (!resp.ok || data.error) {
-      // Job expired or deleted — fall back to credential form
-      peShowCredentialForm(container, lookback, null);
+    if (resp.status === 401 && data.error === "token_required") {
+      // Profile expired — reuse stored token if available, otherwise show form
+      if (_peOrgToken) {
+        return peLoadCustomMetricsBreakdownDirect(container, lookback, data.realm || _peOrgRealm, _peOrgToken);
+      }
+      peShowCredentialForm(container, lookback, data.realm || "us0");
       return;
     }
-
-    const { metrics = [], utilizationSummary = {}, totalCustomMts, totalOrgMts, customMetricCount } = data;
-
-    // Utilization breakdown bar
-    const UTIL_ORDER = ["R0 - Unused", "R1 - Inactive Charts", "R2 - API queries", "R3 - Active charts", "R4 - Detectors"];
-    peRenderCustomMetricsData(container, data);
+    if (!resp.ok || data.error) {
+      // Treat upstream 401 (stale token in profile) same as token_required
+      const isAuthErr = resp.status === 401 || /401|invalid token|unauthorized/i.test(data.error || "");
+      if (isAuthErr) {
+        _peOrgToken = ""; // clear stale token so form doesn't auto-retry
+        peShowCredentialForm(container, lookback, data.realm || _peOrgRealm);
+      } else {
+        container.innerHTML = `<p class="pe-drill-fetch-error">Error: ${escapeHtml(data.error || `HTTP ${resp.status}`)}</p>`;
+      }
+      return;
+    }
+    peRenderCustomMetricsData(container, data, "");
   } catch (e) {
     container.innerHTML = `<p class="pe-drill-fetch-error">Request failed: ${escapeHtml(String(e))}</p>`;
   }
 }
 
-function peRenderCustomMetricsData(container, data) {
-  const { metrics = [], utilizationSummary = {}, totalCustomMts, totalOrgMts, customMetricCount, lookback = "" } = data;
+function peRenderCustomMetricsData(container, data, activeBillingClass) {
+  const { metrics = [], utilizationSummary = {}, totalCustomMts, totalOrgMts, customMetricCount, lookback = "", billingClasses = [] } = data;
+
+
+  // Remove the static IM cardinality table — this panel replaces it
+  const allWraps = [...document.querySelectorAll(".table-pagination-wrap")];
+  const imWrap = allWraps.find((w) => w.querySelector("table") && isMetricCardinalityVolumeTable(w.querySelector("table")));
+  if (imWrap) imWrap.remove();
+
+  // Default active filter to Custom when coming from the tile
+  const selectedBc = activeBillingClass !== undefined ? activeBillingClass : "Custom";
 
   const UTIL_ORDER = ["R0 - Unused", "R1 - Inactive Charts", "R2 - API queries", "R3 - Active charts", "R4 - Detectors"];
   const UTIL_COLORS = { "R0 - Unused": "#ef4444", "R1 - Inactive Charts": "#f97316", "R2 - API queries": "#eab308", "R3 - Active charts": "#22c55e", "R4 - Detectors": "#3b82f6" };
@@ -1362,37 +1434,342 @@ function peRenderCustomMetricsData(container, data) {
     `<span class="pe-drill-util-leg-val">${escapeHtml(formatPeScalarDisplay(u.mts))} MTS (${u.pct.toFixed(1)}%)</span></div>`
   ).join("");
 
-  const tableRows = metrics.slice(0, 200).map((m) => {
-    const utilColor = UTIL_COLORS[m.utilization] || "#94a3b8";
-    return `<tr>
-      <td class="pe-drill-mname">${escapeHtml(m.metricName)}</td>
-      <td><span class="pe-drill-util-badge" style="background:${utilColor}20;color:${utilColor};border-color:${utilColor}40">${escapeHtml(m.utilization)}</span></td>
-      <td class="pe-drill-val">${escapeHtml(formatPeScalarDisplay(m.averageHourlyMts))}</td>
-      <td class="pe-drill-val">${m.pctOfCustomTotal.toFixed(2)}%</td>
-      <td class="pe-drill-val">${m.pctOfOrgTotal.toFixed(2)}%</td>
-    </tr>`;
-  }).join("");
+  // Check governance column availability across all rows
+  const hasSource = metrics.some((m) => m.source);
+  const hasDims = metrics.some((m) => m.dimensionCount > 0);
+  const hasCreator = metrics.some((m) => m.creator);
 
-  const moreNote = metrics.length > 200 ? `<p class="pe-drill-more-note">Showing top 200 of ${metrics.length} custom metrics.</p>` : "";
+  // Build billing class filter options
+  const allBillingClasses = billingClasses.length
+    ? billingClasses
+    : [...new Set(metrics.map((m) => m.billingClass).filter(Boolean))].sort();
+
+  const bcOptions = [
+    `<option value="">All billing classes</option>`,
+    ...allBillingClasses.map((bc) =>
+      `<option value="${escapeHtml(bc)}" ${bc === selectedBc ? "selected" : ""}>${escapeHtml(bc)}</option>`
+    ),
+  ].join("");
+
+  const thead = `<tr>
+    <th class="sortable" data-sort="metricName"><span class="pe-th-tip" data-tip="The full metric name as reported by the Usage Analytics API">Metric name</span><span class="pe-sort-arrow">⇅</span></th>
+    <th class="sortable" data-sort="billingClass"><span class="pe-th-tip" data-tip="How Splunk bills this metric: Custom (counts against your custom MTS quota), Default/Bundled (included with your subscription), or Other">Billing class</span><span class="pe-sort-arrow">⇅</span></th>
+    <th class="sortable" data-sort="utilization"><span class="pe-th-tip" data-tip="How actively this metric is being consumed — R0 Unused has no consumers; R4 Detectors is highest value">Utilization</span><span class="pe-sort-arrow">⇅</span></th>
+    <th class="sortable" data-sort="averageHourlyMts"><span class="pe-th-tip" data-tip="Average number of metric time series (MTS) produced per hour over the lookback window">Avg MTS/hr</span><span class="pe-sort-arrow">▼</span></th>
+    <th class="sortable" data-sort="pctOfOrgTotal"><span class="pe-th-tip" data-tip="This metric's MTS volume as a percentage of your total org-wide MTS">% of org total</span><span class="pe-sort-arrow">⇅</span></th>
+    ${hasSource ? `<th class="sortable" data-sort="source"><span class="pe-th-tip" data-tip="The integration or source sending this metric (e.g. aws, k8s, otel)">Source</span><span class="pe-sort-arrow">⇅</span></th>` : ""}
+    ${hasDims ? `<th class="sortable" data-sort="dimensionCount"><span class="pe-th-tip" data-tip="Number of distinct dimensions on this metric — high cardinality drives high MTS cost">Dimensions</span><span class="pe-sort-arrow">⇅</span></th>` : ""}
+    <th class="sortable" data-sort="usage"><span class="pe-th-tip" data-tip="Where this metric is referenced: det = detectors, active = active charts, inactive = saved/inactive charts, API = programmatic API queries. — means unused.">Usage</span><span class="pe-sort-arrow">⇅</span></th>
+    ${hasCreator ? `<th class="sortable" data-sort="creator"><span class="pe-th-tip" data-tip="The user who created or owns this metric">Creator</span><span class="pe-sort-arrow">⇅</span></th>` : ""}
+    <th><span class="pe-th-tip" data-tip="Service names found on this metric's time series, with MTS count per service">Services</span></th>
+    <th><span class="pe-th-tip" data-tip="Deployment environments found on this metric's time series, with MTS count per environment">Environments</span></th>
+  </tr>`;
 
   container.innerHTML = `
     <div class="pe-drill-cm-summary">
-      <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num">${escapeHtml(formatPeScalarDisplay(customMetricCount))}</span><span class="pe-drill-cm-stat-label">Custom metrics</span></div>
-      <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num">${escapeHtml(formatPeScalarDisplay(totalCustomMts))}</span><span class="pe-drill-cm-stat-label">Custom MTS (avg/hr)</span></div>
-      <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num">${totalOrgMts > 0 ? (100 * totalCustomMts / totalOrgMts).toFixed(1) + "%" : "—"}</span><span class="pe-drill-cm-stat-label">% of org total MTS</span></div>
+      <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num" id="pe-stat-metric-count">${escapeHtml(formatPeScalarDisplay(metrics.length))}</span><span class="pe-drill-cm-stat-label" id="pe-stat-metric-label">All metrics</span></div>
+      <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num" id="pe-stat-filtered-mts">${escapeHtml(formatPeScalarDisplay(totalOrgMts))}</span><span class="pe-drill-cm-stat-label" id="pe-stat-filtered-mts-label">Org total MTS (avg/hr)</span></div>
+      <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num" id="pe-stat-filtered-pct">100%</span><span class="pe-drill-cm-stat-label" id="pe-stat-filtered-pct-label">% of org MTS</span></div>
       ${lookback ? `<div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num">${escapeHtml(lookback)}</span><span class="pe-drill-cm-stat-label">Lookback window</span></div>` : ""}
     </div>
-    <h5 class="pe-drill-cm-section-head">Utilization breakdown</h5>
+    <h5 class="pe-drill-cm-section-head">Custom metrics utilization</h5>
     <div class="pe-drill-util-bar">${barSegs || '<div style="width:100%;background:var(--splunk-border);height:100%"></div>'}</div>
     <div class="pe-drill-util-legend">${utilLegend || '<p class="pe-drill-empty">No utilization data.</p>'}</div>
     <div class="pe-drill-cm-insight">${buildCustomMetricsInsight(utilRows, totalCustomMts)}</div>
-    <h5 class="pe-drill-cm-section-head">Top custom metrics by MTS volume</h5>
-    <table class="pe-drill-table pe-drill-cm-table">
-      <thead><tr><th>Metric name</th><th>Utilization</th><th>Avg MTS/hr</th><th>% of custom</th><th>% of org</th></tr></thead>
-      <tbody>${tableRows}</tbody>
-    </table>
-    ${moreNote}`;
+    <div class="pe-cm-table-toolbar">
+      <h5 class="pe-drill-cm-section-head" style="margin:0">All metrics by MTS volume</h5>
+      <div class="pe-cm-filter-group">
+        <label class="pe-cm-filter-label" for="pe-cm-bc-filter">Billing class</label>
+        <select id="pe-cm-bc-filter" class="pe-drill-lookback-select">${bcOptions}</select>
+        <span class="pe-cm-row-count" id="pe-cm-row-count"></span>
+      </div>
+    </div>
+    <div class="pe-cm-table-wrap">
+      <table class="pe-drill-table pe-drill-cm-table" id="pe-cm-metrics-table">
+        <thead>${thead}</thead>
+        <tbody id="pe-cm-metrics-tbody"></tbody>
+      </table>
+    </div>
+    <p class="pe-drill-more-note" id="pe-cm-more-note"></p>`;
+
+  // Render table rows filtered by billing class
+  const tbody = container.querySelector("#pe-cm-metrics-tbody");
+  const countEl = container.querySelector("#pe-cm-row-count");
+  const moreEl = container.querySelector("#pe-cm-more-note");
+  const bcFilter = container.querySelector("#pe-cm-bc-filter");
+
+  const jobId = new URLSearchParams(window.location.search).get("hubJob") || "";
+  // Use module-level token (set by credential form) — no second prompt needed
+  if (data.realm) _peOrgRealm = data.realm;
+  const _svcCache = {};
+
+  async function fetchMetricServices(metricName) {
+    if (_svcCache[metricName]) return _svcCache[metricName];
+    const headers = _peOrgToken ? { "X-CM-Token": _peOrgToken } : {};
+    let resp, d;
+    if (jobId) {
+      resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/drilldown/metric-services?metric=${encodeURIComponent(metricName)}`, { headers });
+    } else {
+      if (!_peOrgToken) throw Object.assign(new Error("token_required"), { realm: _peOrgRealm });
+      resp = await fetch(`/api/drilldown/metric-services?metric=${encodeURIComponent(metricName)}&realm=${encodeURIComponent(_peOrgRealm)}`, { headers });
+    }
+    d = await resp.json();
+    if (resp.status === 401 && d.error === "token_required") throw Object.assign(new Error("token_required"), { realm: d.realm || _peOrgRealm });
+    if (!resp.ok || d.error) throw new Error(d.error || `HTTP ${resp.status}`);
+    _svcCache[metricName] = { services: d.services || [], environments: d.environments || [] };
+    return _svcCache[metricName];
+  }
+
+  let _tokenPromptShown = false;
+  const _pendingCells = [];
+
+  function showTokenBanner(realm) {
+    if (_tokenPromptShown) return;
+    _tokenPromptShown = true;
+    _peOrgRealm = realm || _peOrgRealm;
+    const banner = document.createElement("div");
+    banner.className = "pe-cm-token-banner";
+    banner.innerHTML = `
+      <span class="pe-cm-token-banner-msg">Enter your org access token to load service data:</span>
+      <input class="pe-drill-cred-input" type="text" placeholder="Realm" value="${escapeHtml(_peOrgRealm)}" style="width:65px" />
+      <input class="pe-drill-cred-input" type="password" placeholder="Token" style="width:190px" autocomplete="off" />
+      <button class="btn pe-drill-load-btn">Load</button>`;
+    const toolbar = container.querySelector(".pe-cm-table-toolbar");
+    if (toolbar) toolbar.after(banner);
+    const inputs = banner.querySelectorAll("input");
+    const btn = banner.querySelector("button");
+    btn.addEventListener("click", async () => {
+      const t = inputs[1].value.trim();
+      if (!t) return;
+      _peOrgToken = t;
+      _peOrgRealm = inputs[0].value.trim() || "us0";
+      banner.remove();
+      await Promise.allSettled(_pendingCells.map(({ td, envTd, metricName }) => loadServiceCell(td, envTd, metricName)));
+      _pendingCells.length = 0;
+    });
+  }
+
+  async function loadServiceCell(td, envTd, metricName) {
+    td.innerHTML = `<span class="pe-cm-svc-loading">…</span>`;
+    envTd.innerHTML = `<span class="pe-cm-svc-loading">…</span>`;
+    try {
+      const { services, environments } = await fetchMetricServices(metricName);
+      const totalMts = services.reduce((sum, s) => sum + (typeof s === "object" ? (s.mts || 0) : 0), 0);
+      const totalLine = totalMts > 0 ? `<div class="pe-cm-svc-total">Total: ${totalMts} MTS</div>` : "";
+      td.innerHTML = services.length
+        ? services.map((s) => {
+            const name = typeof s === "object" ? s.name : s;
+            const mts = typeof s === "object" ? s.mts : null;
+            const tip = mts != null ? `${mts} MTS attributed to ${name}` : name;
+            return `<span class="pe-cm-svc-tag" data-tip="${escapeHtml(tip)}">${escapeHtml(name)}${mts != null ? ` <span class="pe-cm-svc-mts">(${mts})</span>` : ""}</span>`;
+          }).join("") + totalLine
+        : `<span class="pe-cm-svc-empty">—</span>`;
+      envTd.innerHTML = environments.length
+        ? environments.map((e) => {
+            const name = typeof e === "object" ? e.name : e;
+            const mts = typeof e === "object" ? e.mts : null;
+            const tip = mts != null ? `${mts} MTS in environment ${name}` : name;
+            return `<span class="pe-cm-svc-tag pe-cm-env-tag" data-tip="${escapeHtml(tip)}">${escapeHtml(name)}${mts != null ? ` <span class="pe-cm-svc-mts">(${mts})</span>` : ""}</span>`;
+          }).join("")
+        : `<span class="pe-cm-svc-empty">—</span>`;
+    } catch (err) {
+      if (err.message === "token_required") {
+        if (_peOrgToken) {
+          td.innerHTML = `<span class="pe-cm-svc-empty" title="Token lacks MTS API scope">—</span>`;
+          envTd.innerHTML = `<span class="pe-cm-svc-empty">—</span>`;
+        } else {
+          td.innerHTML = `<span class="pe-cm-svc-empty">—</span>`;
+          envTd.innerHTML = `<span class="pe-cm-svc-empty">—</span>`;
+          _pendingCells.push({ td, envTd, metricName });
+          showTokenBanner(err.realm);
+        }
+      } else {
+        td.innerHTML = `<span class="pe-cm-svc-empty" title="${escapeHtml(String(err))}">err</span>`;
+        envTd.innerHTML = `<span class="pe-cm-svc-empty">—</span>`;
+      }
+    }
+  }
+
+  // ── Sort & pagination state ────────────────────────────────────────────────
+  let _sortKey = "averageHourlyMts";
+  let _sortDir = -1; // -1 = desc, 1 = asc
+  let _page = 0;
+  let _pageSize = 25;
+  let _filtered = [];
+
+  const SORT_KEYS = {
+    metricName: (m) => m.metricName,
+    billingClass: (m) => m.billingClass || "",
+    utilization: (m) => m.utilization || "",
+    averageHourlyMts: (m) => m.averageHourlyMts || 0,
+    pctOfOrgTotal: (m) => m.pctOfOrgTotal || 0,
+    ...(hasSource ? { source: (m) => m.source || "" } : {}),
+    ...(hasDims ? { dimensionCount: (m) => m.dimensionCount || 0 } : {}),
+    usage: (m) => (m.detectors || 0) + (m.activeCharts || 0) + (m.inactiveCharts || 0) + (m.apiQueries || 0),
+    ...(hasCreator ? { creator: (m) => m.creator || "" } : {}),
+  };
+
+  // Wire up sortable headers
+  container.querySelectorAll("th.sortable").forEach((th) => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.sort;
+      if (_sortKey === key) { _sortDir *= -1; } else { _sortKey = key; _sortDir = -1; }
+      _page = 0;
+      applyFilter(bcFilter.value);
+    });
+  });
+
+  // Pagination controls — injected after table
+  const paginationEl = document.createElement("div");
+  paginationEl.className = "pe-cm-pagination";
+  container.querySelector(".pe-cm-table-wrap").after(paginationEl);
+
+  function renderPagination(total) {
+    const totalPages = Math.max(1, Math.ceil(total / _pageSize));
+    paginationEl.innerHTML = `
+      <button id="pe-pg-first" ${_page === 0 ? "disabled" : ""}>« First</button>
+      <button id="pe-pg-prev" ${_page === 0 ? "disabled" : ""}>‹ Prev</button>
+      <span class="pe-cm-page-info">Page ${_page + 1} of ${totalPages} &nbsp;(${total.toLocaleString()} metrics)</span>
+      <button id="pe-pg-next" ${_page >= totalPages - 1 ? "disabled" : ""}>Next ›</button>
+      <button id="pe-pg-last" ${_page >= totalPages - 1 ? "disabled" : ""}>Last »</button>
+      <label class="pe-cm-page-size-label">Rows
+        <select class="pe-cm-page-size-select">
+          <option value="25" ${_pageSize === 25 ? "selected" : ""}>25</option>
+          <option value="50" ${_pageSize === 50 ? "selected" : ""}>50</option>
+          <option value="100" ${_pageSize === 100 ? "selected" : ""}>100</option>
+          <option value="250" ${_pageSize === 250 ? "selected" : ""}>250</option>
+        </select>
+      </label>`;
+    paginationEl.querySelector("#pe-pg-first").onclick = () => { _page = 0; applyFilter(bcFilter.value); };
+    paginationEl.querySelector("#pe-pg-prev").onclick = () => { _page--; applyFilter(bcFilter.value); };
+    paginationEl.querySelector("#pe-pg-next").onclick = () => { _page++; applyFilter(bcFilter.value); };
+    paginationEl.querySelector("#pe-pg-last").onclick = () => { _page = totalPages - 1; applyFilter(bcFilter.value); };
+    paginationEl.querySelector(".pe-cm-page-size-select").onchange = (e) => {
+      _pageSize = parseInt(e.target.value);
+      _page = 0;
+      applyFilter(bcFilter.value);
+    };
+  }
+
+  function updateSortHeaders() {
+    container.querySelectorAll("th.sortable").forEach((th) => {
+      th.classList.remove("sort-asc", "sort-desc");
+      const arrow = th.querySelector(".pe-sort-arrow");
+      if (th.dataset.sort === _sortKey) {
+        th.classList.add(_sortDir === -1 ? "sort-desc" : "sort-asc");
+        if (arrow) arrow.textContent = _sortDir === -1 ? "▼" : "▲";
+      } else {
+        if (arrow) arrow.textContent = "⇅";
+      }
+    });
+  }
+
+  const CONCURRENCY = 8;
+  async function drainSvcCells(queue) {
+    const active = [];
+    for (const item of queue) {
+      const p = loadServiceCell(item.td, item.envTd, item.metricName).then(() => active.splice(active.indexOf(p), 1));
+      active.push(p);
+      if (active.length >= CONCURRENCY) await Promise.race(active);
+    }
+    await Promise.allSettled(active);
+  }
+
+  function updateStatTiles(bc, filteredMetrics) {
+    const label = bc || "All";
+    const filteredMts = filteredMetrics.reduce((s, m) => s + (m.averageHourlyMts || 0), 0);
+    const pct = totalOrgMts > 0 ? (100 * filteredMts / totalOrgMts).toFixed(1) + "%" : "—";
+    const el = (id) => container.querySelector("#" + id);
+    const mc = el("pe-stat-metric-count"); if (mc) mc.textContent = formatPeScalarDisplay(filteredMetrics.length);
+    const ml = el("pe-stat-metric-label"); if (ml) ml.textContent = bc ? `${bc} metrics` : "All metrics";
+    const fm = el("pe-stat-filtered-mts"); if (fm) fm.textContent = formatPeScalarDisplay(filteredMts);
+    const fl = el("pe-stat-filtered-mts-label"); if (fl) fl.textContent = `${label} MTS (avg/hr)`;
+    const fp = el("pe-stat-filtered-pct"); if (fp) fp.textContent = pct;
+    const fpl = el("pe-stat-filtered-pct-label"); if (fpl) fpl.textContent = `${label} % of org MTS`;
+  }
+
+  function applyFilter(bc) {
+    _filtered = bc ? metrics.filter((m) => m.billingClass === bc) : metrics.slice();
+    updateStatTiles(bc, _filtered);
+    const fn = SORT_KEYS[_sortKey];
+    if (fn) {
+      _filtered.sort((a, b) => {
+        const av = fn(a), bv = fn(b);
+        return typeof av === "string" ? av.localeCompare(bv) * _sortDir : (av - bv) * _sortDir;
+      });
+    }
+    countEl.textContent = `${_filtered.length.toLocaleString()} metric${_filtered.length !== 1 ? "s" : ""}`;
+    moreEl.textContent = "";
+    updateSortHeaders();
+
+    const start = _page * _pageSize;
+    const shown = _filtered.slice(start, start + _pageSize);
+    tbody.innerHTML = "";
+    const svcCells = [];
+    shown.forEach((m) => {
+      const utilColor = UTIL_COLORS[m.utilization] || "#94a3b8";
+      const usageCell = [
+        m.detectors > 0 ? `<span class="pe-cm-usage-tag pe-cm-usage-tag--det" title="${m.detectors} detector(s)">${m.detectors} det</span>` : "",
+        m.activeCharts > 0 ? `<span class="pe-cm-usage-tag pe-cm-usage-tag--ac" title="${m.activeCharts} active chart(s)">${m.activeCharts} active</span>` : "",
+        m.inactiveCharts > 0 ? `<span class="pe-cm-usage-tag pe-cm-usage-tag--ic" title="${m.inactiveCharts} inactive chart(s)">${m.inactiveCharts} inactive</span>` : "",
+        m.apiQueries > 0 ? `<span class="pe-cm-usage-tag pe-cm-usage-tag--api" title="${m.apiQueries} API quer(ies)">${m.apiQueries} API</span>` : "",
+      ].filter(Boolean).join(" ") || '<span class="pe-cm-usage-none">—</span>';
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td class="pe-drill-mname">${escapeHtml(m.metricName)}</td>
+        <td class="pe-drill-val">${escapeHtml(m.billingClass || "—")}</td>
+        <td><span class="pe-drill-util-badge" style="background:${utilColor}20;color:${utilColor};border-color:${utilColor}40">${escapeHtml(m.utilization)}</span></td>
+        <td class="pe-drill-val">${escapeHtml(formatPeScalarDisplay(m.averageHourlyMts))}</td>
+        <td class="pe-drill-val">${(m.pctOfOrgTotal || 0).toFixed(2)}%</td>
+        ${hasSource ? `<td class="pe-drill-val">${escapeHtml(m.source || "—")}</td>` : ""}
+        ${hasDims ? `<td class="pe-drill-val">${m.dimensionCount > 0 ? m.dimensionCount : "—"}</td>` : ""}
+        <td class="pe-cm-usage-cell">${usageCell}</td>
+        ${hasCreator ? `<td class="pe-drill-val">${escapeHtml(m.creator || "—")}</td>` : ""}
+        <td class="pe-cm-svc-cell pe-drill-val"></td>
+        <td class="pe-cm-env-cell pe-drill-val"></td>`;
+      tbody.appendChild(tr);
+      svcCells.push({ td: tr.querySelector(".pe-cm-svc-cell"), envTd: tr.querySelector(".pe-cm-env-cell"), metricName: m.metricName });
+    });
+    renderPagination(_filtered.length);
+    drainSvcCells(svcCells);
+  }
+
+  bcFilter.addEventListener("change", () => { _page = 0; applyFilter(bcFilter.value); });
+  applyFilter(selectedBc);
+
+  // Tooltip for column headers — fixed-position div escapes overflow clipping
+  let _tipEl = document.getElementById("pe-col-tooltip");
+  if (!_tipEl) {
+    _tipEl = document.createElement("div");
+    _tipEl.id = "pe-col-tooltip";
+    document.body.appendChild(_tipEl);
+  }
+  function showTip(text, targetEl) {
+    _tipEl.textContent = text;
+    _tipEl.style.display = "block";
+    const r = targetEl.getBoundingClientRect();
+    let left = r.left + r.width / 2 - 110;
+    left = Math.max(8, Math.min(left, window.innerWidth - 228));
+    _tipEl.style.left = left + "px";
+    _tipEl.style.top = (r.bottom + 6) + "px";
+  }
+  function hideTip() { _tipEl.style.display = "none"; }
+
+  container.querySelectorAll(".pe-th-tip").forEach((el) => {
+    el.addEventListener("mouseenter", () => showTip(el.dataset.tip || "", el));
+    el.addEventListener("mouseleave", hideTip);
+  });
+
+  // Delegated tooltip for dynamically-added service/env tags
+  tbody.addEventListener("mouseover", (e) => {
+    const tag = e.target.closest(".pe-cm-svc-tag[data-tip]");
+    if (tag) showTip(tag.dataset.tip, tag);
+  });
+  tbody.addEventListener("mouseout", (e) => {
+    if (e.target.closest(".pe-cm-svc-tag[data-tip]")) hideTip();
+  });
 }
+
 
 /**
  * Generate an actionable insight sentence based on utilization distribution.
@@ -1722,7 +2099,7 @@ function buildPlatformEngagementKpiDeck(payload) {
         <span class="pe-kpi-card__delta-text">${escapeHtml(err ? "Error" : delta.text)}</span>
       </div>
       ${err ? `<p class="pe-kpi-card__err">${escapeHtml(err.slice(0, 200))}</p>` : ""}
-      <span class="pe-kpi-card__drill-hint" aria-hidden="true">${isCustomMetricsTile ? "View in IM table →" : "View breakdown →"}</span>
+      <span class="pe-kpi-card__drill-hint" aria-hidden="true">${isCustomMetricsTile ? "View MTS breakdown →" : "View breakdown →"}</span>
     `;
     if (isCustomMetricsTile) {
       card.setAttribute("aria-label", `Drill down: ${String(kpi.label || kpi.id || "KPI")} — view Custom metrics in IM table`);
@@ -2524,7 +2901,15 @@ function paginateMetricCardinalityTables(rootEl) {
 
     // Expose programmatic filter control for drill-through from KPI tiles
     wrap.__o11ySetBillingFilter = (billingClass) => {
-      filterSelect.value = billingClass || "";
+      if (billingClass) {
+        // Exact match first, then prefix/contains match (e.g. "Custom" matches "Custom (MTS)")
+        const opts = [...filterSelect.options];
+        const exact = opts.find((o) => o.value === billingClass);
+        const fuzzy = exact || opts.find((o) => o.value.toLowerCase().startsWith(billingClass.toLowerCase()));
+        filterSelect.value = fuzzy ? fuzzy.value : billingClass;
+      } else {
+        filterSelect.value = "";
+      }
       // Show all rows when filtering programmatically
       select.value = "500";
       pageSize = 500;
@@ -3143,6 +3528,9 @@ async function buildUI() {
     sortSyntheticsDisabledTestsTableByLastRunAsc(bodyEl);
     sortMonthlyTablesChronologically(bodyEl);
     paginateMetricCardinalityTables(bodyEl);
+    if (sec.title.trim().toLowerCase().includes("infrastructure monitoring")) {
+      peInjectCustomMetricsPanel(bodyEl);
+    }
     paginateAnalyzeIntegrationsTables(bodyEl);
     paginateDetectorHealthTables(bodyEl);
     paginateDashboardHealthTables(bodyEl);

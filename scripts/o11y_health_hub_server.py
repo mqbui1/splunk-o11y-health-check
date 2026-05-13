@@ -415,6 +415,27 @@ def _yaml_scalar(s: str) -> str:
     return json.dumps(s, ensure_ascii=False)
 
 
+def _build_metric_row(im_mod: Any, r: dict, mname: str, bc: str, util: str, mts: float, pct: float) -> dict:
+    """Build a metric row dict with all available governance columns."""
+    intish = im_mod._intish
+    row_get = im_mod._row_get_ci
+    return {
+        "metricName": mname,
+        "billingClass": bc,
+        "utilization": util,
+        "averageHourlyMts": round(mts, 2),
+        "pctOfOrgTotal": round(pct, 4),
+        "source": im_mod._optional_source(r),
+        "detectors": intish(row_get(r, "usedInDetectors", "detectorCount", "detectorsCount", "numDetectors")) or 0,
+        "activeCharts": intish(row_get(r, "usedInActiveCharts", "activeChartCount", "activeChartsCount", "numActiveCharts")) or 0,
+        "inactiveCharts": intish(row_get(r, "usedInInactiveCharts", "inactiveChartCount", "inactiveChartsCount", "numInactiveCharts")) or 0,
+        "apiQueries": intish(row_get(r, "usedInApi", "apiQueryCount", "numApiQueries", "apiCount")) or 0,
+        "dimensionCount": intish(row_get(r, "dimensionCount", "numDimensions", "dimensions", "cardinalityCount")) or 0,
+        "creator": str(row_get(r, "creator", "createdBy", "owner", "creatorEmail") or ""),
+        "lastUpdated": str(row_get(r, "lastUpdated", "updatedAt", "lastSeen", "lastActiveTime") or ""),
+    }
+
+
 def _write_ephemeral_profile(
     job_dir: Path,
     *,
@@ -960,29 +981,25 @@ def create_app():
         rows = im_mod._extract_row_list(payload)
         rows = im_mod._sort_rows(rows)
         total_mts = sum(im_mod._mts_value(r) for r in rows)
-        custom_rows = []
+        all_rows = []
         for r in rows:
             mname = im_mod._metric_name(r)
             bc = im_mod._billing_class_from_row(r, mname)
-            if bc != "Custom":
-                continue
             mts = im_mod._mts_value(r)
             pct = (100.0 * mts / total_mts) if total_mts > 0 else 0.0
             util = im_mod._utilization_from_row(r)
-            custom_rows.append({
-                "metricName": mname,
-                "utilization": util,
-                "averageHourlyMts": round(mts, 2),
-                "pctOfOrgTotal": round(pct, 4),
-            })
+            all_rows.append(_build_metric_row(im_mod, r, mname, bc, util, mts, pct))
+
+        custom_rows = [r for r in all_rows if r["billingClass"] == "Custom"]
         total_custom_mts = sum(r["averageHourlyMts"] for r in custom_rows)
-        for r in custom_rows:
+        for r in all_rows:
             r["pctOfCustomTotal"] = round(
                 100.0 * r["averageHourlyMts"] / total_custom_mts if total_custom_mts > 0 else 0.0, 4
             )
         util_summary: dict[str, float] = {}
         for r in custom_rows:
             util_summary[r["utilization"]] = util_summary.get(r["utilization"], 0) + r["averageHourlyMts"]
+        billing_classes = sorted({r["billingClass"] for r in all_rows if r["billingClass"]})
 
         return jsonify({
             "realm": realm,
@@ -991,7 +1008,8 @@ def create_app():
             "totalCustomMts": round(total_custom_mts, 2),
             "customMetricCount": len(custom_rows),
             "utilizationSummary": util_summary,
-            "metrics": custom_rows,
+            "billingClasses": billing_classes,
+            "metrics": all_rows,
         })
 
     @app.get("/api/jobs/<job_id>/drilldown/custom-metrics")
@@ -1004,9 +1022,30 @@ def create_app():
         if not _safe_job_id(job_id):
             return jsonify({"error": "invalid id"}), HTTPStatus.BAD_REQUEST
         job_dir = JOBS_ROOT / job_id
+        if not job_dir.is_dir():
+            return jsonify({"error": "job not found"}), HTTPStatus.NOT_FOUND
         profile_path = job_dir / "_ephemeral_profile.yaml"
         if not profile_path.is_file():
-            return jsonify({"error": "job profile not found — job may have been deleted"}), HTTPStatus.NOT_FOUND
+            # Ephemeral profile was deleted — return realm from meta so frontend can prefill
+            meta_path = job_dir / "meta.json"
+            realm_hint = "us0"
+            lookback_hint = "P7D"
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    realm_hint = str(meta.get("realm") or "us0").strip()
+                except Exception:
+                    pass
+            report_path = job_dir / "report.json"
+            if report_path.is_file():
+                try:
+                    rd = json.loads(report_path.read_text(encoding="utf-8"))
+                    lb = str(rd.get("im", {}).get("lookbackPeriod") or "P7D").strip().upper()
+                    if lb in ("P1D", "P7D", "P30D"):
+                        lookback_hint = lb
+                except Exception:
+                    pass
+            return jsonify({"error": "token_required", "realm": realm_hint, "lookback": lookback_hint}), HTTPStatus.UNAUTHORIZED
 
         # Load realm + token from the ephemeral profile
         try:
@@ -1032,9 +1071,20 @@ def create_app():
         if not token:
             return jsonify({"error": "no token in job profile"}), HTTPStatus.INTERNAL_SERVER_ERROR
 
-        lookback = str(request.args.get("lookback") or "P7D").strip().upper()
+        # Use lookback from original report run; fall back to query param, then P7D
+        report_lookback = "P7D"
+        report_path = job_dir / "report.json"
+        if report_path.is_file():
+            try:
+                report_data = json.loads(report_path.read_text(encoding="utf-8"))
+                report_lookback = str(report_data.get("im", {}).get("lookbackPeriod") or "P7D").strip().upper()
+                if report_lookback not in ("P1D", "P7D", "P30D"):
+                    report_lookback = "P7D"
+            except Exception:
+                pass
+        lookback = str(request.args.get("lookback") or report_lookback).strip().upper()
         if lookback not in ("P1D", "P7D", "P30D"):
-            lookback = "P7D"
+            lookback = report_lookback
         try:
             limit = max(100, min(10000, int(request.args.get("limit") or "2000")))
         except (ValueError, TypeError):
@@ -1058,25 +1108,18 @@ def create_app():
         rows = im_mod._sort_rows(rows)
 
         total_mts = sum(im_mod._mts_value(r) for r in rows)
-        custom_rows = []
+        all_rows = []
         for r in rows:
             mname = im_mod._metric_name(r)
             bc = im_mod._billing_class_from_row(r, mname)
-            if bc != "Custom":
-                continue
             mts = im_mod._mts_value(r)
             pct = (100.0 * mts / total_mts) if total_mts > 0 else 0.0
             util = im_mod._utilization_from_row(r)
-            custom_rows.append({
-                "metricName": mname,
-                "utilization": util,
-                "averageHourlyMts": round(mts, 2),
-                "pctOfOrgTotal": round(pct, 4),
-            })
+            all_rows.append(_build_metric_row(im_mod, r, mname, bc, util, mts, pct))
 
+        custom_rows = [r for r in all_rows if r["billingClass"] == "Custom"]
         total_custom_mts = sum(r["averageHourlyMts"] for r in custom_rows)
-        # Add pct of custom subtotal
-        for r in custom_rows:
+        for r in all_rows:
             r["pctOfCustomTotal"] = round(
                 100.0 * r["averageHourlyMts"] / total_custom_mts if total_custom_mts > 0 else 0.0, 4
             )
@@ -1084,6 +1127,7 @@ def create_app():
         util_summary: dict[str, float] = {}
         for r in custom_rows:
             util_summary[r["utilization"]] = util_summary.get(r["utilization"], 0) + r["averageHourlyMts"]
+        billing_classes = sorted({r["billingClass"] for r in all_rows if r["billingClass"]})
 
         return jsonify({
             "realm": realm,
@@ -1092,8 +1136,120 @@ def create_app():
             "totalCustomMts": round(total_custom_mts, 2),
             "customMetricCount": len(custom_rows),
             "utilizationSummary": util_summary,
-            "metrics": custom_rows,
+            "billingClasses": billing_classes,
+            "metrics": all_rows,
         })
+
+    def _mts_services_for_metric(token: str, realm: str, metric_name: str) -> tuple[list[dict], list[dict], str | None]:
+        """Query /v2/metrictimeseries and return per-service and per-environment MTS counts."""
+        import urllib.request, urllib.parse, urllib.error
+        query = f'sf_metric:"{metric_name}"'
+        url = (
+            f"https://api.{realm}.signalfx.com/v2/metrictimeseries"
+            f"?query={urllib.parse.quote(query)}&limit=200"
+        )
+        try:
+            req = urllib.request.Request(url, headers={"X-SF-TOKEN": token, "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            import sys
+            print(f"[metric-services] HTTP {e.code} for metric={metric_name!r} realm={realm!r} token_prefix={token[:8]!r}", file=sys.stderr)
+            if e.code in (401, 403):
+                return [], [], "token_required"
+            return [], [], f"HTTP {e.code}"
+        except Exception as e:
+            import sys
+            print(f"[metric-services] Exception for metric={metric_name!r}: {e}", file=sys.stderr)
+            return [], [], str(e)
+
+        results = body.get("results") or []
+        service_counts: dict[str, int] = {}
+        env_counts: dict[str, int] = {}
+        for mts in results:
+            dims = mts.get("dimensions") or {}
+            svc = None
+            for key in ("service", "sf_service", "deployment.service", "k8s.deployment.name"):
+                val = dims.get(key)
+                if isinstance(val, str) and val.strip():
+                    svc = val.strip()
+                    break
+            if svc:
+                service_counts[svc] = service_counts.get(svc, 0) + 1
+            for key in ("deployment.environment", "sf_environment", "environment"):
+                val = dims.get(key)
+                if isinstance(val, str) and val.strip():
+                    env_counts[val.strip()] = env_counts.get(val.strip(), 0) + 1
+                    break
+
+        services = sorted([{"name": k, "mts": v} for k, v in service_counts.items()], key=lambda x: -x["mts"])
+        environments = sorted([{"name": k, "mts": v} for k, v in env_counts.items()], key=lambda x: -x["mts"])
+        return services, environments, None
+
+    @app.get("/api/drilldown/metric-services")
+    def drilldown_metric_services_direct():
+        """Stateless: get services for a metric. Token via X-CM-Token header, realm + metric via query params."""
+        token = (request.headers.get("X-CM-Token") or "").strip()
+        realm = str(request.args.get("realm") or "us0").strip()
+        metric_name = str(request.args.get("metric") or "").strip()
+        if not token:
+            return jsonify({"error": "X-CM-Token header required"}), HTTPStatus.BAD_REQUEST
+        if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$", realm):
+            return jsonify({"error": "invalid realm"}), HTTPStatus.BAD_REQUEST
+        if not metric_name:
+            return jsonify({"error": "metric param required"}), HTTPStatus.BAD_REQUEST
+        services, environments, err = _mts_services_for_metric(token, realm, metric_name)
+        if err == "token_required":
+            return jsonify({"error": "token_required", "realm": realm}), HTTPStatus.UNAUTHORIZED
+        if err:
+            return jsonify({"error": err}), HTTPStatus.BAD_GATEWAY
+        return jsonify({"metric": metric_name, "services": services, "environments": environments})
+
+    @app.get("/api/jobs/<job_id>/drilldown/metric-services")
+    def drilldown_metric_services(job_id: str):
+        """Job-bound: get services for a metric using the job's stored credentials."""
+        if not _safe_job_id(job_id):
+            return jsonify({"error": "invalid id"}), HTTPStatus.BAD_REQUEST
+        job_dir = JOBS_ROOT / job_id
+        profile_path = job_dir / "_ephemeral_profile.yaml"
+        token, realm = "", "us0"
+        # Always load realm from meta.json first as the authoritative source
+        meta_path = job_dir / "meta.json"
+        if meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                realm = str(meta.get("realm") or "us0").strip()
+            except Exception:
+                pass
+        if profile_path.is_file():
+            try:
+                import yaml as _yaml  # type: ignore[import-untyped]
+            except ImportError:
+                _yaml = None
+            try:
+                raw = profile_path.read_text(encoding="utf-8")
+                prof = _yaml.safe_load(raw) if _yaml else {}
+                token = str(prof.get("access_token") or "").strip()
+                # Profile realm overrides meta.json if present
+                if prof.get("realm"):
+                    realm = str(prof["realm"]).strip()
+            except Exception:
+                pass
+        if not token:
+            # Fall back to token from request header
+            token = (request.headers.get("X-CM-Token") or "").strip()
+            if not token:
+                return jsonify({"error": "token_required", "realm": realm}), HTTPStatus.UNAUTHORIZED
+
+        metric_name = str(request.args.get("metric") or "").strip()
+        if not metric_name:
+            return jsonify({"error": "metric param required"}), HTTPStatus.BAD_REQUEST
+        services, environments, err = _mts_services_for_metric(token, realm, metric_name)
+        if err == "token_required":
+            return jsonify({"error": "token_required", "realm": realm}), HTTPStatus.UNAUTHORIZED
+        if err:
+            return jsonify({"error": err}), HTTPStatus.BAD_GATEWAY
+        return jsonify({"metric": metric_name, "services": services, "environments": environments})
 
     @app.delete("/api/jobs/<job_id>")
     def delete_job(job_id: str):
