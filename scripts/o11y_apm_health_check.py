@@ -22,6 +22,7 @@ deferred; endpoint grouping and trace heuristics use `spans.count` + bounded tra
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import math
@@ -1254,41 +1255,52 @@ def fetch_full_traces_by_ids(
     *,
     max_successful: int,
     sleep_between_fetch_s: float,
+    max_workers: int = 8,
 ) -> tuple[dict[str, dict[str, Any]], list[str], bool]:
     """
-    Load each trace ID at most once. Returns:
+    Load each trace ID at most once, using a thread pool for parallel fetches.
+    Returns:
     - cache: trace_id -> GraphQL ``trace`` object (includes ``spans``)
     - findings: per-trace load errors (HTTP/GraphQL)
     - stopped_at_cap: True if more IDs were left but ``max_successful`` successful loads was reached
     """
-    cache: dict[str, dict[str, Any]] = {}
-    findings: list[str] = []
-    stopped_at_cap = False
-    for tid in ordered_ids:
-        if len(cache) >= max_successful:
-            stopped_at_cap = True
-            break
+    # Cap the IDs we'll even attempt to the max_successful limit to avoid over-fetching
+    ids_to_fetch = ordered_ids[:max_successful]
+    stopped_at_cap = len(ordered_ids) > max_successful
+
+    def _fetch_one(tid: str) -> tuple[str, dict[str, Any] | None, str | None]:
         try:
             raw = get_trace_full_graphql(app_base, token, tid)
         except RuntimeError as e:
-            findings.append(f"Could not load trace `{tid[:12]}…`: {str(e)[:120]}")
-            time.sleep(sleep_between_fetch_s)
-            continue
+            return tid, None, f"Could not load trace `{tid[:12]}…`: {str(e)[:120]}"
         if raw.get("errors"):
-            findings.append(f"Could not load trace `{tid[:12]}…` (GraphQL errors from get_trace_full).")
-            time.sleep(sleep_between_fetch_s)
-            continue
+            return tid, None, f"Could not load trace `{tid[:12]}…` (GraphQL errors from get_trace_full)."
         tr = (raw.get("data") or {}).get("trace")
         if not isinstance(tr, dict):
-            time.sleep(sleep_between_fetch_s)
-            continue
+            return tid, None, None
         spans = tr.get("spans") or []
         if not isinstance(spans, list):
-            time.sleep(sleep_between_fetch_s)
-            continue
-        cache[tid] = tr
-        time.sleep(sleep_between_fetch_s)
-    return cache, findings, stopped_at_cap
+            return tid, None, None
+        return tid, tr, None
+
+    cache: dict[str, dict[str, Any]] = {}
+    findings: list[str] = []
+    workers = max(1, min(max_workers, len(ids_to_fetch)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_fetch_one, tid): tid for tid in ids_to_fetch}
+        for fut in concurrent.futures.as_completed(futures):
+            tid, tr, err = fut.result()
+            if err:
+                findings.append(err)
+            elif tr is not None:
+                cache[tid] = tr
+
+    # Preserve ordering of cache keys to match original ordered_ids (downstream code may rely on order)
+    ordered_cache: dict[str, dict[str, Any]] = {}
+    for tid in ids_to_fetch:
+        if tid in cache:
+            ordered_cache[tid] = cache[tid]
+    return ordered_cache, findings, stopped_at_cap
 
 
 def merge_unified_fetch_order(
@@ -1712,14 +1724,13 @@ def collect_minimal_spans_trace_ids(
     fetch_limit: int,
     traces_per_service: int,
     exclude_health: bool,
+    max_workers: int = 8,
 ) -> tuple[dict[str, list[str]], list[str]]:
     """
-    Trace Analytics search only — ordered trace IDs per service for later unified get_trace_full.
+    Trace Analytics search — ordered trace IDs per service, fetched in parallel.
     Returns (service_to_ids, findings).
     """
-    service_to_ids: dict[str, list[str]] = {}
-    findings: list[str] = []
-    for svc in top_services:
+    def _search_one(svc: str) -> tuple[str, list[str] | None, str | None]:
         try:
             r = apm_search_traces(
                 app_base,
@@ -1730,11 +1741,9 @@ def collect_minimal_spans_trace_ids(
                 services=[svc],
             )
         except RuntimeError as e:
-            findings.append(f"{svc}: trace search failed ({str(e)[:200]}).")
-            continue
+            return svc, None, f"{svc}: trace search failed ({str(e)[:200]})."
         if r.get("error"):
-            findings.append(f"{svc}: {r.get('error')}")
-            continue
+            return svc, None, f"{svc}: {r.get('error')}"
         traces = r.get("traces") or []
         pool: list[dict[str, Any]] = []
         for ex in traces:
@@ -1744,18 +1753,37 @@ def collect_minimal_spans_trace_ids(
                 continue
             pool.append(ex)
         if exclude_health and not pool and traces:
-            findings.append(
+            return svc, None, (
                 f"{svc}: the sample only contained health-style traffic — no minimal-span stats for this service."
             )
-            continue
         ids = ordered_trace_ids_from_examples(pool)
         if not ids:
-            findings.append(
+            return svc, None, (
                 f"{svc}: no trace IDs in Trace Analytics examples — cannot load full traces for span counts."
             )
-            continue
-        service_to_ids[svc] = ids
-    return service_to_ids, findings
+        return svc, ids, None
+
+    service_to_ids: dict[str, list[str]] = {}
+    findings: list[str] = []
+    if not top_services:
+        return service_to_ids, findings
+
+    workers = max(1, min(max_workers, len(top_services)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_search_one, svc): svc for svc in top_services}
+        for fut in concurrent.futures.as_completed(futures):
+            svc, ids, err = fut.result()
+            if err:
+                findings.append(err)
+            elif ids is not None:
+                service_to_ids[svc] = ids
+
+    # Preserve original service ordering
+    ordered: dict[str, list[str]] = {}
+    for svc in top_services:
+        if svc in service_to_ids:
+            ordered[svc] = service_to_ids[svc]
+    return ordered, findings
 
 
 # --- Sensitive / debug span heuristics (same trace fetch as span size) ---
@@ -3079,19 +3107,47 @@ def _apm_run_checks_after_profile_loaded(
         spans_sf_stop_reason: str | None = None
 
         if need_sf:
-            program = (
+            spans_program = (
                 "data('spans.count').sum(by=['sf_service','sf_operation','sf_environment'])"
                 ".publish(label='apm')"
             )
-            meta, dps, err, sr = signalflow_matrix_collect(
-                stream_url=stream_base,
-                token=token,
-                program=program,
-                start_ms=start_ms,
-                stop_ms=stop_ms,
-                resolution_ms=APM_SIGNALFLOW_RESOLUTION_MS,
-                max_data_points=sf_max_pts,
+            need_traces_rollup = bool(want & {"usage_by_service", "minimal_spans"})
+            traces_program = (
+                "data('traces.count').sum(by=['sf_service','sf_environment']).publish(label='tr')"
+                if need_traces_rollup else None
             )
+
+            # Run spans.count and traces.count SignalFlow queries concurrently
+            def _run_spans_sf() -> tuple:
+                return signalflow_matrix_collect(
+                    stream_url=stream_base,
+                    token=token,
+                    program=spans_program,
+                    start_ms=start_ms,
+                    stop_ms=stop_ms,
+                    resolution_ms=APM_SIGNALFLOW_RESOLUTION_MS,
+                    max_data_points=sf_max_pts,
+                )
+
+            def _run_traces_sf() -> tuple:
+                return signalflow_matrix_collect(
+                    stream_url=stream_base,
+                    token=token,
+                    program=traces_program,
+                    start_ms=start_ms,
+                    stop_ms=stop_ms,
+                    resolution_ms=APM_SIGNALFLOW_RESOLUTION_MS,
+                    wall_seconds=60.0,
+                    max_data_points=sf_max_pts,
+                )
+
+            sf_workers = 2 if need_traces_rollup else 1
+            with concurrent.futures.ThreadPoolExecutor(max_workers=sf_workers) as sf_pool:
+                spans_fut = sf_pool.submit(_run_spans_sf)
+                traces_fut = sf_pool.submit(_run_traces_sf) if need_traces_rollup else None
+                meta, dps, err, sr = spans_fut.result()
+                traces_sf_result = traces_fut.result() if traces_fut else None
+
             spans_sf_stop_reason = sr
             if err:
                 checks_out["_signalflow_error"] = {
@@ -3111,20 +3167,8 @@ def _apm_run_checks_after_profile_loaded(
                     )
 
             # traces.count rollup is used by usage_by_service and (when present) to rank minimal_spans sampling.
-            if want & {"usage_by_service", "minimal_spans"}:
-                tprog = (
-                    "data('traces.count').sum(by=['sf_service','sf_environment']).publish(label='tr')"
-                )
-                tmeta, tdps, terr, _tsr = signalflow_matrix_collect(
-                    stream_url=stream_base,
-                    token=token,
-                    program=tprog,
-                    start_ms=start_ms,
-                    stop_ms=stop_ms,
-                    resolution_ms=APM_SIGNALFLOW_RESOLUTION_MS,
-                    wall_seconds=60.0,
-                    max_data_points=sf_max_pts,
-                )
+            if need_traces_rollup and traces_sf_result is not None:
+                tmeta, tdps, terr, _tsr = traces_sf_result
                 if not terr:
                     tr = rollup_spans_by_dims(tmeta, tdps)
                     traces_rollup = defaultdict(float)
