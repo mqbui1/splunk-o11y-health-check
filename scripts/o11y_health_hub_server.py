@@ -41,6 +41,7 @@ VIEWER_DIR = REPO_ROOT / "web" / "o11y-health-report"
 # Optional: python-pptx / playwright must be installed for those artifacts (runner logs errors).
 
 _jobs_lock = threading.Lock()
+_running_procs: dict[str, "subprocess.Popen[str]"] = {}  # job_id -> live Popen
 
 # Ordered checklist steps shown in the Hub progress UI (IDs must match parser + runner [HUB_PROGRESS] phases).
 _HUB_PROGRESS_SPEC: list[tuple[str, str, str | None]] = [
@@ -644,11 +645,13 @@ def _run_job_thread(job_id: str) -> None:
                 bufsize=1,
                 env={**os.environ, "PYTHONUNBUFFERED": "1", "O11Y_HUB_PROGRESS": "1"},
             )
+            _running_procs[job_id] = proc
             assert proc.stdout is not None
             for line in proc.stdout:
                 logf.write(line)
                 logf.flush()
             rc = proc.wait()
+            _running_procs.pop(job_id, None)
         elapsed = time.monotonic() - t0
         artifacts = {
             "hasMarkdown": (job_dir / "report.md").is_file(),
@@ -682,6 +685,7 @@ def _run_job_thread(job_id: str) -> None:
             hasPdf=(job_dir / "report.pdf").is_file(),
         )
     finally:
+        _running_procs.pop(job_id, None)
         try:
             if profile_path.is_file():
                 profile_path.unlink()
@@ -1430,17 +1434,15 @@ def create_app():
         job_dir = JOBS_ROOT / job_id
         if not job_dir.is_dir():
             return jsonify({"error": "not found"}), HTTPStatus.NOT_FOUND
+        # Kill running subprocess if present
+        proc = _running_procs.pop(job_id, None)
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
         with _jobs_lock:
-            mp = job_dir / "meta.json"
-            if mp.is_file():
-                try:
-                    m = json.loads(mp.read_text(encoding="utf-8"))
-                    if str(m.get("status") or "") == "running":
-                        return jsonify(
-                            {"error": "Cannot delete a run that is still in progress. Wait for it to finish or fail."}
-                        ), HTTPStatus.CONFLICT
-                except json.JSONDecodeError:
-                    pass
             shutil.rmtree(job_dir, ignore_errors=True)
         return jsonify({"ok": True}), HTTPStatus.OK
 

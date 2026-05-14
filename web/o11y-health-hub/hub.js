@@ -611,7 +611,7 @@
           "Delete run " + (j.reportTitle || j.id || "").slice(0, 80)
         );
         delBtn.addEventListener("click", () => {
-          deleteJob(j.id, j.reportTitle || j.id || "this run");
+          deleteJob(j.id, j.reportTitle || j.id || "this run", j.status === "running" || j.status === "queued");
         });
         actTd.appendChild(delBtn);
         tb.appendChild(tr);
@@ -631,16 +631,15 @@
     }
   }
 
-  async function deleteJob(jobId, title) {
+  async function deleteJob(jobId, title, isRunning) {
     const label = String(title || "this run").slice(0, 200);
-    if (!window.confirm('Delete run "' + label + '" and all artifacts? This cannot be undone.')) return;
+    const msg = isRunning
+      ? 'Run "' + label + '" is still in progress. Delete it and kill the process? This cannot be undone.'
+      : 'Delete run "' + label + '" and all artifacts? This cannot be undone.';
+    if (!window.confirm(msg)) return;
     try {
       const res = await fetch("/api/jobs/" + encodeURIComponent(jobId), { method: "DELETE" });
       const data = await res.json().catch(() => ({}));
-      if (res.status === 409) {
-        alert(data.error || "Cannot delete a run that is still in progress.");
-        return;
-      }
       if (!res.ok) {
         alert(data.error || "Delete failed");
         return;
