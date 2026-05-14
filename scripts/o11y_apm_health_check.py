@@ -2887,6 +2887,14 @@ def main() -> int:
         help="Max datapoints to read from each spans.count / traces.count SignalFlow stream (default 300000). "
         "Lower values risk **truncated** rollups and empty Health Endpoints rows in large orgs.",
     )
+    p.add_argument(
+        "--signalflow-wall-seconds",
+        type=float,
+        default=45.0,
+        metavar="SEC",
+        help="Max wall-clock seconds to stream each SignalFlow query (default 45). "
+        "Lower = faster but may truncate rollups for very large orgs.",
+    )
     p.add_argument("--realm", default=None, help="Realm (default: profile or SPLUNK_REALM or us0)")
     p.add_argument("--profile", default=None, metavar="PATH", help="YAML profile (see license script)")
     p.add_argument(
@@ -3117,6 +3125,8 @@ def _apm_run_checks_after_profile_loaded(
                 if need_traces_rollup else None
             )
 
+            sf_wall = float(args.signalflow_wall_seconds)
+
             # Run spans.count and traces.count SignalFlow queries concurrently
             def _run_spans_sf() -> tuple:
                 return signalflow_matrix_collect(
@@ -3126,6 +3136,7 @@ def _apm_run_checks_after_profile_loaded(
                     start_ms=start_ms,
                     stop_ms=stop_ms,
                     resolution_ms=APM_SIGNALFLOW_RESOLUTION_MS,
+                    wall_seconds=sf_wall,
                     max_data_points=sf_max_pts,
                 )
 
@@ -3137,7 +3148,7 @@ def _apm_run_checks_after_profile_loaded(
                     start_ms=start_ms,
                     stop_ms=stop_ms,
                     resolution_ms=APM_SIGNALFLOW_RESOLUTION_MS,
-                    wall_seconds=60.0,
+                    wall_seconds=min(sf_wall, 45.0),
                     max_data_points=sf_max_pts,
                 )
 
