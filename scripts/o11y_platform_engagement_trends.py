@@ -55,6 +55,14 @@ from o11y_license_utilization import (  # noqa: E402
     utc_end_of_day_ms_inclusive,
 )
 from o11y_script_logging import setup_script_logging  # noqa: E402
+from o11y_im_metrics_usage_breakdown import (  # noqa: E402
+    _billing_class_from_row,
+    _deep_extract_metric_rows,
+    _metric_name,
+    _mts_value,
+    fetch_metrics_usage_payload,
+)
+from o11y_rum_health_check import _RUM_SESSION_PROGRAMS, _app_label_from_props  # noqa: E402
 
 STRUCTURED_SCHEMA = "o11y_platform_engagement_trends/v1"
 
@@ -363,6 +371,453 @@ def _fetch_synthetics_run_sum_series(
     return _dedupe_ts_mean(pts), None
 
 
+# --- Platform engagement KPI drill-downs (viewer overlay contributors) -----------------
+
+
+@dataclass(frozen=True)
+class _PeGaugeWindows:
+    """Time filters for service.request.count matrix sums (match gauge KPI windows)."""
+
+    rolling: bool
+    # rolling: ts with cmp_lo_exclusive < ts <= cmp_hi_inclusive
+    cmp_lo_exclusive: int
+    cmp_hi_inclusive: int
+    base_lo_exclusive: int
+    base_hi_inclusive: int
+    # custom: cmp_lo_inclusive <= ts < cmp_hi_exclusive
+    cmp_lo_inclusive: int
+    cmp_hi_exclusive: int
+    base_lo_inclusive: int
+    base_hi_exclusive: int
+
+
+def _pe_rum_syn_half_open_ranges(
+    cfg: TrendConfig,
+    *,
+    custom_compare: bool,
+    month_pair: bool,
+    prev_y: int,
+    prev_m: int,
+    base_y: int,
+    base_m: int,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """((c_lo, c_hi_excl), (b_lo, b_hi_excl)) for RUM / Synthetics bucket sums."""
+    if custom_compare and not month_pair:
+        c_lo = int(cfg.custom_current_start_ms or 0)
+        c_hi = int(cfg.custom_current_end_exclusive_ms or 0)
+        b_lo = int(cfg.custom_baseline_start_ms or 0)
+        b_hi = int(cfg.custom_baseline_end_exclusive_ms or 0)
+        return (c_lo, c_hi), (b_lo, b_hi)
+    c_lo, c_hi = _utc_month_bounds_ms(prev_y, prev_m)
+    b_lo, b_hi = _utc_month_bounds_ms(base_y, base_m)
+    return (c_lo, c_hi), (b_lo, b_hi)
+
+
+def _pe_gauge_windows(
+    cfg: TrendConfig,
+    stop_ms: int,
+    *,
+    custom_compare: bool,
+    baseline_offset_ms: int,
+) -> _PeGaugeWindows:
+    last_ts = int(stop_ms)
+    if custom_compare:
+        return _PeGaugeWindows(
+            rolling=False,
+            cmp_lo_exclusive=0,
+            cmp_hi_inclusive=0,
+            base_lo_exclusive=0,
+            base_hi_inclusive=0,
+            cmp_lo_inclusive=int(cfg.custom_current_start_ms or 0),
+            cmp_hi_exclusive=int(cfg.custom_current_end_exclusive_ms or 0),
+            base_lo_inclusive=int(cfg.custom_baseline_start_ms or 0),
+            base_hi_exclusive=int(cfg.custom_baseline_end_exclusive_ms or 0),
+        )
+    end_b = last_ts - baseline_offset_ms
+    return _PeGaugeWindows(
+        rolling=True,
+        cmp_lo_exclusive=last_ts - int(cfg.current_window_ms),
+        cmp_hi_inclusive=last_ts,
+        base_lo_exclusive=end_b - int(cfg.baseline_window_ms),
+        base_hi_inclusive=end_b,
+        cmp_lo_inclusive=0,
+        cmp_hi_exclusive=0,
+        base_lo_inclusive=0,
+        base_hi_exclusive=0,
+    )
+
+
+def _matrix_ts_ok_for_gauge(ts_ms: int, gw: _PeGaugeWindows, *, comparison: bool) -> bool:
+    if gw.rolling:
+        if comparison:
+            return gw.cmp_lo_exclusive < ts_ms <= gw.cmp_hi_inclusive
+        return gw.base_lo_exclusive < ts_ms <= gw.base_hi_inclusive
+    if comparison:
+        return gw.cmp_lo_inclusive <= ts_ms < gw.cmp_hi_exclusive
+    return gw.base_lo_inclusive <= ts_ms < gw.base_hi_exclusive
+
+
+def _matrix_sum_by_tsid(
+    metadata: dict[str, dict[str, Any]],
+    dps: list[dict[str, Any]],
+    ts_ok,
+) -> dict[str, float]:
+    sums: dict[str, float] = {}
+    for pt in dps:
+        ts_raw = pt.get("timestampMs")
+        if ts_raw is None:
+            continue
+        try:
+            ts_ms = int(ts_raw)
+        except (TypeError, ValueError):
+            continue
+        if not ts_ok(ts_ms):
+            continue
+        tid = pt.get("tsId")
+        if tid is None:
+            continue
+        v = pt.get("value")
+        if not isinstance(v, (int, float)):
+            continue
+        k = str(tid)
+        sums[k] = sums.get(k, 0.0) + float(v)
+    return sums
+
+
+def _service_env_label(meta: dict[str, dict[str, Any]], tsid: str) -> str:
+    props = meta.get(tsid) or {}
+    if not isinstance(props, dict):
+        props = {}
+    svc = props.get("service.name") or props.get("sf_service") or "—"
+    env = props.get("sf_environment") or props.get("deployment.environment") or "—"
+    return f"{svc} · {env}"
+
+
+def _synth_test_label(meta: dict[str, dict[str, Any]], tsid: str) -> str:
+    props = meta.get(tsid) or {}
+    if not isinstance(props, dict):
+        props = {}
+    name = props.get("test") or props.get("sf_test") or "—"
+    tt = props.get("test_type") or props.get("testType") or ""
+    return f"{name} ({tt})" if tt else str(name)
+
+
+def _rows_top_added_removed_delta(
+    cmp_sums: dict[str, float],
+    base_sums: dict[str, float],
+    label_fn,
+    *,
+    top_n: int = 10,
+) -> dict[str, Any]:
+    keys_c = set(cmp_sums)
+    keys_b = set(base_sums)
+    added = sorted(((k, cmp_sums[k]) for k in keys_c - keys_b), key=lambda x: -x[1])[:top_n]
+    removed = sorted(((k, base_sums[k]) for k in keys_b - keys_c), key=lambda x: -x[1])[:top_n]
+    delta_rows = sorted(
+        ((k, cmp_sums[k] - base_sums[k], base_sums[k], cmp_sums[k]) for k in keys_c & keys_b),
+        key=lambda x: -abs(x[1]),
+    )[:top_n]
+    return {
+        "added": [
+            {"id": k, "label": label_fn(k), "baselineValue": 0.0, "comparisonValue": v, "delta": v}
+            for k, v in added
+        ],
+        "removed": [
+            {"id": k, "label": label_fn(k), "baselineValue": v, "comparisonValue": 0.0, "delta": -v}
+            for k, v in removed
+        ],
+        "largestDelta": [
+            {
+                "id": k,
+                "label": label_fn(k),
+                "baselineValue": bv,
+                "comparisonValue": cv,
+                "delta": d,
+            }
+            for k, d, bv, cv in delta_rows
+        ],
+    }
+
+
+def _drill_instrumented_apps(
+    *,
+    stream_url: str,
+    token: str,
+    fetch_lo: int,
+    stop_ms: int,
+    resolution_ms: int,
+    gw: _PeGaugeWindows,
+) -> dict[str, Any]:
+    program = (
+        "data('service.request.count').sum(by=['service.name', 'sf_environment']).publish(label='apps')"
+    )
+    meta, dps, err, stop = execute_signalflow_matrix(
+        stream_url=stream_url,
+        token=token,
+        program=program,
+        start_ms=fetch_lo,
+        stop_ms=stop_ms,
+        resolution_ms=resolution_ms,
+        wall_seconds=320.0,
+        read_timeout=150.0,
+        max_data_points=400_000,
+    )
+    if err:
+        return {"error": err[:500]}
+    if stop and stop not in ("end_of_channel", None):
+        logger.info("Drill instrumented_apps matrix stop_reason=%s", stop)
+    cmp_sums = _matrix_sum_by_tsid(
+        meta,
+        dps,
+        lambda ts: _matrix_ts_ok_for_gauge(ts, gw, comparison=True),
+    )
+    base_sums = _matrix_sum_by_tsid(
+        meta,
+        dps,
+        lambda ts: _matrix_ts_ok_for_gauge(ts, gw, comparison=False),
+    )
+    tables = _rows_top_added_removed_delta(
+        cmp_sums,
+        base_sums,
+        lambda tid: _service_env_label(meta, tid),
+    )
+    return {
+        "methodology": (
+            "Sums of ``service.request.count`` rollup bucket values per service×environment in the same "
+            "UTC windows as the Instrumented Applications KPI (rolling means or custom ranges)."
+        ),
+        **tables,
+    }
+
+
+def _drill_rum_sessions(
+    *,
+    stream_url: str,
+    token: str,
+    fetch_lo: int,
+    stop_ms: int,
+    c_range: tuple[int, int],
+    b_range: tuple[int, int],
+) -> dict[str, Any]:
+    c_lo, c_hi = c_range
+    b_lo, b_hi = b_range
+    last_err = None
+    for program in _RUM_SESSION_PROGRAMS:
+        meta, dps, err, stop = execute_signalflow_matrix(
+            stream_url=stream_url,
+            token=token,
+            program=program,
+            start_ms=fetch_lo,
+            stop_ms=stop_ms,
+            resolution_ms=_MS_DAY,
+            wall_seconds=280.0,
+            read_timeout=150.0,
+            max_data_points=300_000,
+        )
+        if err:
+            last_err = err
+            continue
+        if stop and stop not in ("end_of_channel", None):
+            logger.info("Drill RUM matrix stop_reason=%s", stop)
+        cmp_sums = _matrix_sum_by_tsid(meta, dps, lambda ts: c_lo <= ts < c_hi)
+        base_sums = _matrix_sum_by_tsid(meta, dps, lambda ts: b_lo <= ts < b_hi)
+        if len(meta) <= 1 and not any(cmp_sums.values()) and not any(base_sums.values()):
+            last_err = "aggregate_only"
+            continue
+        tables = _rows_top_added_removed_delta(
+            cmp_sums,
+            base_sums,
+            lambda tid: _app_label_from_props(meta.get(tid) or {}),
+        )
+        return {
+            "methodology": (
+                "Sum of daily ``sf.org.rum.numSessions`` buckets per application dimension in the same "
+                "UTC windows as the RUM Sessions KPI (full calendar months or custom ranges)."
+            ),
+            **tables,
+        }
+    return {
+        "error": (last_err or "no_program")[:500],
+        "methodology": "Per-application RUM drill-down could not be computed.",
+    }
+
+
+_SYN_PROG_PRIMARY = (
+    "data('synthetics.run.count').sum(by=['test', 'test_type']).publish(label='syn_drill')"
+)
+_SYN_PROG_FALLBACK = "data('synthetics.run.count').sum(by=['test']).publish(label='syn_drill')"
+
+
+def _drill_synthetics(
+    *,
+    stream_url: str,
+    token: str,
+    fetch_lo: int,
+    stop_ms: int,
+    c_range: tuple[int, int],
+    b_range: tuple[int, int],
+) -> dict[str, Any]:
+    c_lo, c_hi = c_range
+    b_lo, b_hi = b_range
+    for program in (_SYN_PROG_PRIMARY, _SYN_PROG_FALLBACK):
+        meta, dps, err, stop = execute_signalflow_matrix(
+            stream_url=stream_url,
+            token=token,
+            program=program,
+            start_ms=fetch_lo,
+            stop_ms=stop_ms,
+            resolution_ms=_MS_DAY,
+            wall_seconds=280.0,
+            read_timeout=150.0,
+            max_data_points=300_000,
+        )
+        if err:
+            continue
+        if stop and stop not in ("end_of_channel", None):
+            logger.info("Drill synthetics matrix stop_reason=%s", stop)
+        cmp_sums = _matrix_sum_by_tsid(meta, dps, lambda ts: c_lo <= ts < c_hi)
+        base_sums = _matrix_sum_by_tsid(meta, dps, lambda ts: b_lo <= ts < b_hi)
+        tables = _rows_top_added_removed_delta(
+            cmp_sums,
+            base_sums,
+            lambda tid: _synth_test_label(meta, tid),
+        )
+        return {
+            "methodology": (
+                "Sum of daily ``synthetics.run.count`` buckets per test (and type when available) in the same "
+                "UTC windows as the Synthetics KPI."
+            ),
+            **tables,
+        }
+    return {"error": "SignalFlow matrix failed for synthetics.run.count", "methodology": ""}
+
+
+def _drill_custom_metrics_usage_api(*, token: str, realm: str) -> dict[str, Any]:
+    """
+    Usage analytics API only exposes fixed lookbacks (e.g. P30D) from query time — not arbitrary months.
+    We return top Custom billing-class metrics for the rolling window with an explicit caveat.
+    """
+    payload, err = fetch_metrics_usage_payload(
+        token,
+        realm,
+        lookback="P30D",
+        limit=5000,
+        billable=True,
+        order_by="-averageHourlyMtsCount",
+    )
+    if err or payload is None:
+        return {"error": (err or "empty")[:500], "methodology": "", "topRecent": []}
+    rows = _deep_extract_metric_rows(payload)
+    custom_rows: list[dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        mname = _metric_name(r)
+        if _billing_class_from_row(r, mname) != "Custom":
+            continue
+        mts = _mts_value(r)
+        custom_rows.append(
+            {
+                "metricName": mname[:200],
+                "averageHourlyMts": mts,
+            }
+        )
+    custom_rows.sort(key=lambda x: -float(x.get("averageHourlyMts") or 0))
+    top = custom_rows[:10]
+    return {
+        "methodology": (
+            "Splunk Usage analytics **metrics** API supports fixed lookbacks only (here: **P30D** from report "
+            "generation time). This is **not** a true baseline-vs-comparison period diff — use Observability "
+            "**Analyze metric usage** for exact windows. Listed: top Custom-class metrics by estimated average "
+            "hourly MTS in that rolling window."
+        ),
+        "topRecent": top,
+        "periodOverPeriodUnavailable": True,
+    }
+
+
+def _compute_pe_drilldowns(
+    *,
+    token: str,
+    cfg: TrendConfig,
+    stream_url: str,
+    fetch_start_ms: int,
+    stop_ms: int,
+    last_ts: int,
+    baseline_offset_ms: int,
+    show_apm: bool,
+    show_cm: bool,
+    show_rum: bool,
+    show_syn: bool,
+    month_pair: bool,
+    custom_compare: bool,
+    prev_y: int,
+    prev_m: int,
+    base_y: int,
+    base_m: int,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    gw = _pe_gauge_windows(cfg, last_ts, custom_compare=custom_compare, baseline_offset_ms=baseline_offset_ms)
+    (c_rng, b_rng) = _pe_rum_syn_half_open_ranges(
+        cfg,
+        custom_compare=custom_compare,
+        month_pair=month_pair,
+        prev_y=prev_y,
+        prev_m=prev_m,
+        base_y=base_y,
+        base_m=base_m,
+    )
+    fetch_lo = min(fetch_start_ms, c_rng[0], b_rng[0]) - 7 * _MS_DAY
+    fetch_lo = max(0, fetch_lo)
+
+    if show_apm:
+        try:
+            out["instrumented_apps"] = _drill_instrumented_apps(
+                stream_url=stream_url,
+                token=token,
+                fetch_lo=fetch_lo,
+                stop_ms=stop_ms,
+                resolution_ms=cfg.apps_resolution_ms,
+                gw=gw,
+            )
+        except Exception as e:
+            logger.exception("instrumented_apps drilldown")
+            out["instrumented_apps"] = {"error": str(e)[:500]}
+    if show_cm:
+        try:
+            out["custom_metrics"] = _drill_custom_metrics_usage_api(token=token, realm=cfg.realm)
+        except Exception as e:
+            logger.exception("custom_metrics drilldown")
+            out["custom_metrics"] = {"error": str(e)[:500]}
+    if show_rum:
+        try:
+            out["rum_sessions_monthly"] = _drill_rum_sessions(
+                stream_url=stream_url,
+                token=token,
+                fetch_lo=fetch_lo,
+                stop_ms=stop_ms,
+                c_range=c_rng,
+                b_range=b_rng,
+            )
+        except Exception as e:
+            logger.exception("rum drilldown")
+            out["rum_sessions_monthly"] = {"error": str(e)[:500]}
+    if show_syn:
+        try:
+            out["synthetics_runs_monthly"] = _drill_synthetics(
+                stream_url=stream_url,
+                token=token,
+                fetch_lo=fetch_lo,
+                stop_ms=stop_ms,
+                c_range=c_rng,
+                b_range=b_rng,
+            )
+        except Exception as e:
+            logger.exception("synthetics drilldown")
+            out["synthetics_runs_monthly"] = {"error": str(e)[:500]}
+    return out
+
+
 def _parse_calendar_month_label(s: str) -> tuple[int, int]:
     """``YYYY-MM`` → (year, month)."""
     t = (s or "").strip()
@@ -409,6 +864,7 @@ def run_platform_engagement_trends(
     cfg: TrendConfig,
     *,
     license_json_path: str | None,
+    skip_pe_drilldown: bool = False,
 ) -> dict[str, Any]:
     stream_url = _stream_url(cfg.realm)
 
@@ -748,6 +1204,32 @@ def run_platform_engagement_trends(
             "allowance was found (``syn_browser_runs`` / ``syn_api_runs`` / ``syn_uptime_runs``)."
         )
 
+    drilldowns: dict[str, Any] | None = None
+    if not skip_pe_drilldown:
+        try:
+            drilldowns = _compute_pe_drilldowns(
+                token=token,
+                cfg=cfg,
+                stream_url=stream_url,
+                fetch_start_ms=start_ms,
+                stop_ms=stop_ms,
+                last_ts=last_ts,
+                baseline_offset_ms=baseline_offset_ms,
+                show_apm=show_apm,
+                show_cm=show_cm,
+                show_rum=show_rum,
+                show_syn=show_syn,
+                month_pair=month_pair,
+                custom_compare=custom_compare,
+                prev_y=prev_y,
+                prev_m=prev_m,
+                base_y=base_y,
+                base_m=base_m,
+            )
+        except Exception:
+            logger.exception("Platform engagement drilldowns failed")
+            drilldowns = {"error": "drilldown computation raised an exception (see log)"}
+
     eff_lookback_days = max(1, int(round((stop_ms - start_ms) / float(_MS_DAY))))
     out: dict[str, Any] = {
         "schema": STRUCTURED_SCHEMA,
@@ -799,6 +1281,8 @@ def run_platform_engagement_trends(
         "kpis": kpis,
         "findings": findings,
     }
+    if drilldowns is not None:
+        out["drilldowns"] = drilldowns
     if custom_compare:
         out["customCompare"] = {
             "currentStart": custom_win_fields.get("currentWindowStart"),
@@ -965,6 +1449,57 @@ def _viewer_pe_kpi_comment(report: dict[str, Any]) -> str:
     return f"<!-- O11Y_PE_KPI:{b} -->\n\n"
 
 
+def _viewer_trim_drill_row(r: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k, v in r.items():
+        if k == "label" and isinstance(v, str):
+            out[k] = v[:160]
+        elif k == "metricName" and isinstance(v, str):
+            out[k] = v[:160]
+        else:
+            out[k] = v
+    return out
+
+
+def _viewer_pe_drilldown_payload(report: dict[str, Any]) -> dict[str, Any]:
+    """Structured contributor tables for static viewer (cap list lengths)."""
+    raw = report.get("drilldowns")
+    if not isinstance(raw, dict):
+        return {"schema": "o11y_pe_viewer_drilldown/v1", "drilldowns": {}}
+    out_dd: dict[str, Any] = {}
+    top_n = 10
+    for key, block in raw.items():
+        if not isinstance(block, dict):
+            continue
+        slim: dict[str, Any] = {
+            "methodology": str(block.get("methodology") or "")[:1200],
+        }
+        if block.get("error"):
+            slim["error"] = str(block.get("error"))[:500]
+        for lst_key in ("added", "removed", "largestDelta", "topRecent"):
+            rows = block.get(lst_key)
+            if isinstance(rows, list):
+                slim[lst_key] = [
+                    _viewer_trim_drill_row(x) if isinstance(x, dict) else x
+                    for x in rows[:top_n]
+                ]
+        if block.get("periodOverPeriodUnavailable") is True:
+            slim["periodOverPeriodUnavailable"] = True
+        out_dd[str(key)] = slim
+    return {"schema": "o11y_pe_viewer_drilldown/v1", "drilldowns": out_dd}
+
+
+def _viewer_pe_drilldown_comment(report: dict[str, Any]) -> str:
+    if not report.get("drilldowns"):
+        return ""
+    payload = _viewer_pe_drilldown_payload(report)
+    if not payload.get("drilldowns"):
+        return ""
+    raw = json.dumps(payload, separators=(",", ":"))
+    b = base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+    return f"<!-- O11Y_PE_DRILLDOWN:{b} -->\n\n"
+
+
 def _mermaid_xychart(title: str, points: list[tuple[int, float]], *, max_points: int = 16) -> str:
     if len(points) < 2:
         return ""
@@ -1021,6 +1556,7 @@ def render_platform_engagement_markdown(report: dict[str, Any] | None) -> str:
     ]
     if report.get("kpis"):
         lines.append(_viewer_pe_kpi_comment(report))
+        lines.append(_viewer_pe_drilldown_comment(report))
 
     cc = report.get("customCompare") or {}
     mc = report.get("monthlyKpiCalendar") or {}
@@ -1234,6 +1770,11 @@ def main() -> int:
     )
     p.add_argument("--structured-json-out", metavar="PATH", help="Write normalized report JSON.")
     p.add_argument("--md-out", metavar="PATH", help="Write markdown section.")
+    p.add_argument(
+        "--skip-pe-drilldown",
+        action="store_true",
+        help="Skip contributor drill-down queries (faster; viewer overlay tables omitted).",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -1354,7 +1895,12 @@ def main() -> int:
 
     exit_code = 0
     try:
-        report = run_platform_engagement_trends(token, cfg, license_json_path=args.license_json)
+        report = run_platform_engagement_trends(
+            token,
+            cfg,
+            license_json_path=args.license_json,
+            skip_pe_drilldown=bool(args.skip_pe_drilldown),
+        )
     except Exception:
         logger.exception("Platform engagement trends crashed")
         report = {

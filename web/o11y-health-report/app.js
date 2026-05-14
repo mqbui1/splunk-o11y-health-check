@@ -214,16 +214,29 @@ function escapeSvgText(s) {
 function formatLicenseAxisNumber(n) {
   const x = Number(n);
   if (!Number.isFinite(x)) return "0";
-  if (Math.abs(x - Math.round(x)) < 1e-6 * Math.max(1, Math.abs(x))) {
-    return String(Math.round(x));
-  }
   const a = Math.abs(x);
+  /** Suffixes apply to large magnitudes even when the value is an integer (tooltips were inconsistent before). */
   if (a >= 1e9) return `${(x / 1e9).toFixed(1)}B`;
   if (a >= 1e6) return `${(x / 1e6).toFixed(1)}M`;
   if (a >= 1e3) return `${(x / 1e3).toFixed(1)}k`;
+  if (Math.abs(x - Math.round(x)) < 1e-6 * Math.max(1, Math.abs(x))) {
+    return String(Math.round(x));
+  }
   if (a >= 100) return x.toFixed(0);
   if (a >= 10) return x.toFixed(1);
   return x.toFixed(2);
+}
+
+/** Utilization % above bars and in tooltips: compact k/M/B for pathological ratios. */
+function formatLicenseUtilizationPercent(pctNum) {
+  if (pctNum == null || !Number.isFinite(pctNum)) return "—";
+  const x = Number(pctNum);
+  const a = Math.abs(x);
+  if (a >= 1e9) return `${(x / 1e9).toFixed(2)}B%`;
+  if (a >= 1e6) return `${(x / 1e6).toFixed(2)}M%`;
+  if (a >= 1e3) return `${(x / 1e3).toFixed(2)}k%`;
+  if (a < 10) return `${x.toFixed(2)}%`;
+  return `${x.toFixed(1)}%`;
 }
 
 function niceLicenseStep(range, targetSteps) {
@@ -360,7 +373,7 @@ function attachLicenseChartTooltips(fig) {
     const month = (bar.dataset.month || "").trim() || "—";
     const pctNum =
       sub > 0 && Number.isFinite(usage) && Number.isFinite(sub) ? (100 * usage) / sub : null;
-    const pctStr = pctNum != null && Number.isFinite(pctNum) ? `${pctNum.toFixed(2)}%` : "—";
+    const pctStr = formatLicenseUtilizationPercent(pctNum);
     const band = licenseUtilBandFromPct(pctNum);
 
     tip.replaceChildren();
@@ -574,12 +587,7 @@ function buildLicenseComboChartHtml(payload) {
       const cx = L + slotW * (i + 0.5);
       const h = (p.usage / yBarScale) * plotH;
       const y0 = yBase - h;
-      const pctStr =
-        meta.pctNum != null && Number.isFinite(meta.pctNum)
-          ? meta.pctNum < 10
-            ? `${meta.pctNum.toFixed(2)}%`
-            : `${meta.pctNum.toFixed(1)}%`
-          : "—";
+      const pctStr = formatLicenseUtilizationPercent(meta.pctNum);
       const pctY = Math.max(T + 12, y0 - 11);
       return `<text class="o11y-license-chart__pct" x="${cx.toFixed(2)}" y="${pctY.toFixed(2)}" text-anchor="middle">${escapeSvgText(
         pctStr
@@ -887,6 +895,187 @@ function extractPlatformEngagementKpiPayload(mdSectionBody) {
 
 function stripPlatformEngagementKpiPayload(mdSectionBody) {
   return (mdSectionBody || "").replace(/\n?<!-- O11Y_PE_KPI:[A-Za-z0-9_-]+=* -->\n?/g, "\n");
+}
+
+/** Contributor tables for Platform engagement KPI overlay (see o11y_platform_engagement_trends.py). */
+function extractPlatformEngagementDrilldownPayload(mdSectionBody) {
+  const m = (mdSectionBody || "").match(/<!-- O11Y_PE_DRILLDOWN:([A-Za-z0-9_-]+=*) -->/);
+  if (!m) return null;
+  try {
+    const json = base64UrlToUtf8(m[1]);
+    const data = JSON.parse(json);
+    if (!data || typeof data.drilldowns !== "object" || data.drilldowns === null) return null;
+    return data;
+  } catch (_) {
+    return null;
+  }
+}
+
+function stripPlatformEngagementDrilldownPayload(mdSectionBody) {
+  return (mdSectionBody || "").replace(/\n?<!-- O11Y_PE_DRILLDOWN:[A-Za-z0-9_-]+=* -->\n?/g, "\n");
+}
+
+const PE_KPI_DRILL_IDS = new Set([
+  "custom_metrics",
+  "instrumented_apps",
+  "rum_sessions_monthly",
+  "synthetics_runs_monthly",
+]);
+
+function peDrilldownBlockHasContent(block) {
+  if (!block || typeof block !== "object") return false;
+  if (block.error) return true;
+  if (Array.isArray(block.topRecent) && block.topRecent.length) return true;
+  if (String(block.methodology || "").trim()) return true;
+  const lists = ["added", "removed", "largestDelta"];
+  return lists.some((k) => Array.isArray(block[k]) && block[k].length > 0);
+}
+
+function peOrderedDrillSections(drill, netDown) {
+  const keys = netDown ? ["removed", "added", "largestDelta"] : ["added", "removed", "largestDelta"];
+  return keys
+    .map((k) => ({ key: k, rows: drill[k] }))
+    .filter((x) => Array.isArray(x.rows) && x.rows.length > 0);
+}
+
+function peDrillSectionTitle(key) {
+  const titles = {
+    added: "Added (comparison period only)",
+    removed: "Removed (baseline period only)",
+    largestDelta: "Largest change (present in both periods)",
+  };
+  return titles[key] || key;
+}
+
+function peFormatDrillDelta(val) {
+  if (val == null || val === "") return "—";
+  const v = typeof val === "number" ? val : parseFloat(val);
+  if (!Number.isFinite(v)) return "—";
+  const sign = v > 0 ? "+" : "";
+  return sign + formatPeScalarDisplay(v);
+}
+
+function peBuildDrilldownContributorTable(rows) {
+  if (!Array.isArray(rows) || !rows.length) return "";
+  const head = `<thead><tr>
+    <th scope="col">Contributor</th>
+    <th scope="col">Baseline</th>
+    <th scope="col">Comparison</th>
+    <th scope="col">Delta</th>
+  </tr></thead>`;
+  const body = rows
+    .map((r) => {
+      const lab = escapeHtml(String(r.label || r.metricName || r.id || "—"));
+      const b = escapeHtml(formatPeScalarDisplay(r.baselineValue));
+      const c = escapeHtml(formatPeScalarDisplay(r.comparisonValue));
+      const d = escapeHtml(peFormatDrillDelta(r.delta));
+      return `<tr><td class="pe-drilldown-table__label">${lab}</td><td>${b}</td><td>${c}</td><td>${d}</td></tr>`;
+    })
+    .join("");
+  return `<div class="pe-drilldown-table-wrap"><table class="pe-drilldown-table">${head}<tbody>${body}</tbody></table></div>`;
+}
+
+function peBuildDrilldownTopRecentTable(rows) {
+  if (!Array.isArray(rows) || !rows.length) return "";
+  const head = `<thead><tr>
+    <th scope="col">Metric</th>
+    <th scope="col">Avg hourly MTS (est.)</th>
+  </tr></thead>`;
+  const body = rows
+    .map((r) => {
+      const name = escapeHtml(String(r.metricName || "—"));
+      const mts = escapeHtml(formatPeScalarDisplay(r.averageHourlyMts));
+      return `<tr><td class="pe-drilldown-table__label">${name}</td><td>${mts}</td></tr>`;
+    })
+    .join("");
+  return `<div class="pe-drilldown-table-wrap"><table class="pe-drilldown-table">${head}<tbody>${body}</tbody></table></div>`;
+}
+
+function ensurePlatformEngagementDrilldownDialog() {
+  let d = document.getElementById("pe-drilldown-dialog");
+  if (!d) {
+    d = document.createElement("dialog");
+    d.id = "pe-drilldown-dialog";
+    d.className = "pe-drilldown-dialog";
+    d.setAttribute("aria-modal", "true");
+    document.body.appendChild(d);
+  }
+  return d;
+}
+
+function openPlatformEngagementDrilldownDialog(kpi, payload, drill, accent, deltaFmt) {
+  const dlg = ensurePlatformEngagementDrilldownDialog();
+  const err = kpi.error ? String(kpi.error) : "";
+  const curDisp = err ? "—" : formatPeScalarDisplay(kpi.current);
+  const baseDisp = err ? "—" : formatPeScalarDisplay(kpi.baseline);
+  const valuesHtml = peBuildKpiCardValuesHtml(kpi, payload, baseDisp, curDisp);
+  const sparkPts = peKpiSparklinePoints(kpi);
+  const spark = peKpiSparklineSvg(sparkPts, accent.stroke, "peDrillSparkFill");
+
+  const curN = Number(kpi.current);
+  const baseN = Number(kpi.baseline);
+  const netDown =
+    !err && Number.isFinite(curN) && Number.isFinite(baseN) && curN < baseN;
+
+  let tablesHtml = "";
+  if (drill.error) {
+    tablesHtml = `<p class="pe-drilldown-modal__err" role="alert">${escapeHtml(String(drill.error))}</p>`;
+  } else if (String(kpi.id) === "custom_metrics") {
+    tablesHtml = peBuildDrilldownTopRecentTable(drill.topRecent);
+    if (!tablesHtml) {
+      tablesHtml = `<p class="pe-drilldown-modal__empty">No Custom-class metric rows returned.</p>`;
+    }
+  } else {
+    const secs = peOrderedDrillSections(drill, netDown);
+    if (!secs.length) {
+      tablesHtml = `<p class="pe-drilldown-modal__empty">No contributor breakdown available for these windows.</p>`;
+    } else {
+      tablesHtml = secs
+        .map((s, i) => {
+          const emph = i === 0 ? " pe-drilldown-modal__section--primary" : "";
+          const title = peDrillSectionTitle(s.key);
+          const tbl = peBuildDrilldownContributorTable(s.rows);
+          return `<section class="pe-drilldown-modal__section${emph}" aria-label="${escapeHtml(title)}">
+            <h4 class="pe-drilldown-modal__section-title">${escapeHtml(title)}</h4>
+            ${tbl}
+          </section>`;
+        })
+        .join("");
+    }
+  }
+
+  const methodology = drill.methodology ? `<p class="pe-drilldown-modal__method">${escapeHtml(String(drill.methodology))}</p>` : "";
+  const utcNote =
+    payload.timeline && payload.timeline.comparisonMode === "month_vs_month"
+      ? "<p class=\"pe-drilldown-modal__utc\">RUM, Synthetics, and instrumented applications use <strong>UTC</strong> windows aligned with the KPI banner. Custom metrics table reflects Usage API lookback limits.</p>"
+      : "<p class=\"pe-drilldown-modal__utc\">Contributor windows match the KPI comparison mode (UTC).</p>";
+
+  const titleId = "pe-drilldown-dialog-title";
+  const kpiTitle = escapeHtml(String(kpi.label || kpi.id || "KPI"));
+
+  dlg.innerHTML = `
+    <div class="pe-drilldown-modal">
+      <header class="pe-drilldown-modal__header">
+        <h3 id="${titleId}" class="pe-drilldown-modal__title">${kpiTitle}</h3>
+        <p class="pe-drilldown-modal__delta-line" aria-label="Change vs baseline">
+          <span class="pe-drilldown-modal__delta-badge pe-kpi-card__delta pe-kpi-card__delta--${escapeHtml(deltaFmt.dir)}">
+            <span class="pe-kpi-card__delta-arrow" aria-hidden="true">${deltaFmt.dir === "up" ? "▲" : deltaFmt.dir === "down" ? "▼" : "◆"}</span>
+            <span class="pe-kpi-card__delta-text">${escapeHtml(err ? "Error" : deltaFmt.text)}</span>
+          </span>
+        </p>
+      </header>
+      <div class="pe-drilldown-modal__spark">${spark}</div>
+      <div class="pe-drilldown-modal__values">${valuesHtml}</div>
+      <div class="pe-drilldown-modal__tables">${tablesHtml}</div>
+      ${methodology}
+      ${utcNote}
+      <form method="dialog" class="pe-drilldown-modal__actions">
+        <button type="submit" class="pe-drilldown-modal__close">Close</button>
+      </form>
+    </div>`;
+
+  dlg.setAttribute("aria-labelledby", titleId);
+  dlg.showModal();
 }
 
 function base64UrlToUtf8(s) {
@@ -2348,10 +2537,18 @@ function buildPlatformEngagementKpiDeck(payload) {
             : "—";
 
     const isCustomMetricsTile = String(kpi.id || "").toLowerCase() === "custom_metrics";
+    const drillRaw =
+      payload.drilldowns && typeof payload.drilldowns === "object"
+        ? payload.drilldowns[String(kpi.id)]
+        : null;
+    const showContributors =
+      PE_KPI_DRILL_IDS.has(String(kpi.id)) && peDrilldownBlockHasContent(drillRaw);
+
     card.setAttribute("tabindex", "0");
     card.setAttribute("role", "button");
     card.setAttribute("aria-label", `Drill down: ${String(kpi.label || kpi.id || "KPI")}`);
     card.classList.add("pe-kpi-card--drillable");
+
     card.innerHTML = `
       <h4 class="pe-kpi-card__title">${escapeHtml(String(kpi.label || kpi.id || "KPI"))}</h4>
       <div class="pe-kpi-card__icon-ring" aria-hidden="true">
@@ -2364,8 +2561,33 @@ function buildPlatformEngagementKpiDeck(payload) {
         <span class="pe-kpi-card__delta-text">${escapeHtml(err ? "Error" : delta.text)}</span>
       </div>
       ${err ? `<p class="pe-kpi-card__err">${escapeHtml(err.slice(0, 200))}</p>` : ""}
-      <span class="pe-kpi-card__drill-hint" aria-hidden="true">${isCustomMetricsTile ? "View MTS breakdown →" : "View breakdown →"}</span>
+      ${showContributors
+        ? `<div class="pe-kpi-card__footer">
+             <button type="button" class="pe-kpi-card__contributors" aria-expanded="false" aria-haspopup="dialog">
+               Contributors
+             </button>
+           </div>`
+        : `<span class="pe-kpi-card__drill-hint" aria-hidden="true">${isCustomMetricsTile ? "View MTS breakdown →" : "View breakdown →"}</span>`
+      }
     `;
+    // "Contributors" button → Ivan's <dialog> popup with contributor breakdown
+    if (showContributors) {
+      const btn = card.querySelector(".pe-kpi-card__contributors");
+      if (btn) {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation(); // don't also fire the card click
+          btn.setAttribute("aria-expanded", "true");
+          openPlatformEngagementDrilldownDialog(kpi, payload, drillRaw, acc, delta);
+          const dlg = document.getElementById("pe-drilldown-dialog");
+          const onClose = () => {
+            btn.setAttribute("aria-expanded", "false");
+            dlg.removeEventListener("close", onClose);
+          };
+          if (dlg) dlg.addEventListener("close", onClose, { once: true });
+        });
+      }
+    }
+    // Card click → our full slide-in modal (custom_metrics scrolls to IM panel instead)
     if (isCustomMetricsTile) {
       card.setAttribute("aria-label", `Drill down: ${String(kpi.label || kpi.id || "KPI")} — view Custom metrics in IM table`);
       const handler = () => peScrollToImCustomMetrics();
@@ -3779,7 +4001,11 @@ async function buildUI() {
     let peKpiPayload = null;
     if (sec.title.trim().toLowerCase() === "platform engagement") {
       peKpiPayload = extractPlatformEngagementKpiPayload(sectionMd);
-      sectionMd = stripPlatformEngagementKpiPayload(sectionMd);
+      const peDrillPayload = extractPlatformEngagementDrilldownPayload(sectionMd);
+      if (peKpiPayload && peDrillPayload && peDrillPayload.drilldowns) {
+        peKpiPayload.drilldowns = peDrillPayload.drilldowns;
+      }
+      sectionMd = stripPlatformEngagementDrilldownPayload(stripPlatformEngagementKpiPayload(sectionMd));
     }
     bodyEl.innerHTML = renderMarkdown(sectionMd);
     enhanceHealthCheckBlockHeadings(bodyEl);

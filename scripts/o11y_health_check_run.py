@@ -1083,6 +1083,11 @@ def main() -> int:
         help="Do not run platform engagement trends (o11y_platform_engagement_trends.py)",
     )
     p.add_argument(
+        "--skip-pe-drilldown",
+        action="store_true",
+        help="Pass --skip-pe-drilldown to platform engagement (skip contributor overlay queries)",
+    )
+    p.add_argument(
         "--skip-im",
         action="store_true",
         help="Do not run Infrastructure Monitoring metrics usage script (o11y_im_metrics_usage_breakdown.py)",
@@ -1398,6 +1403,9 @@ def main() -> int:
     skip_rum = args.skip_rum or profile_bool(profile.get("health_check_skip_rum"), False)
     skip_platform_engagement = args.skip_platform_engagement or profile_bool(
         profile.get("health_check_skip_platform_engagement"), False
+    )
+    skip_pe_drilldown = args.skip_pe_drilldown or profile_bool(
+        profile.get("health_check_skip_pe_drilldown"), False
     )
     skip_tokens = args.skip_tokens or profile_bool(profile.get("health_check_skip_tokens"), False)
     skip_otel_collectors = args.skip_otel_collectors or profile_bool(
