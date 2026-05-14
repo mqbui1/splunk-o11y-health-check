@@ -54,6 +54,7 @@ import os
 import statistics
 import sys
 import time
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -648,14 +649,19 @@ def execute_signalflow_time_series(
                 err = "max_points"
                 return
 
+    per_read_timeout = max(5.0, read_timeout)
     try:
-        with urllib.request.urlopen(req, timeout=read_timeout + 30) as resp:
+        with urllib.request.urlopen(req, timeout=per_read_timeout) as resp:
             block: list[str] = []
             while True:
                 if time.monotonic() - t0 > wall_seconds:
                     err = "wall_timeout"
                     break
-                line_b = resp.readline()
+                try:
+                    line_b = resp.readline()
+                except (TimeoutError, OSError):
+                    err = "wall_timeout"
+                    break
                 if not line_b:
                     break
                 raw_bytes += len(line_b)
@@ -685,7 +691,7 @@ def execute_signalflow_time_series(
                 ev, msg = _parse_sse_block(block)
                 if _payload_kind(ev, msg) == "data":
                     _ingest_data_msg(msg)
-    except TimeoutError:
+    except (TimeoutError, http.client.IncompleteRead):
         err = "socket_timeout"
     except urllib.error.HTTPError as e:
         body = (e.read() or b"")[:2048].decode("utf-8", errors="replace")
@@ -809,14 +815,19 @@ def execute_signalflow_matrix(
             return False
         return False
 
+    per_read_timeout = max(5.0, read_timeout)
     try:
-        with urllib.request.urlopen(req, timeout=read_timeout + 30) as resp:
+        with urllib.request.urlopen(req, timeout=per_read_timeout) as resp:
             block: list[str] = []
             while True:
                 if time.monotonic() - t0 > wall_seconds:
                     stop_reason = stop_reason or "wall_timeout"
                     break
-                line_b = resp.readline()
+                try:
+                    line_b = resp.readline()
+                except (TimeoutError, OSError):
+                    stop_reason = stop_reason or "wall_timeout"
+                    break
                 if not line_b:
                     break
                 raw_bytes += len(line_b)
@@ -835,7 +846,7 @@ def execute_signalflow_matrix(
             if block and stop_reason is None and err is None:
                 ev, msg = _parse_sse_block(block)
                 handle_msg(ev, msg)
-    except TimeoutError:
+    except (TimeoutError, http.client.IncompleteRead):
         err = err or "socket_timeout"
     except urllib.error.HTTPError as e:
         err = f"http_{e.code}:{(e.read() or b'')[:800].decode('utf-8', errors='replace')}"

@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import sys
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -422,7 +423,7 @@ def fetch_metrics_usage_payload(
     except urllib.error.HTTPError as e:
         err = (e.read() or b"").decode("utf-8", errors="replace")
         return None, f"HTTP {e.code}: {err[:2000]}"
-    except OSError as e:
+    except (OSError, http.client.IncompleteRead) as e:
         return None, str(e)
 
     try:

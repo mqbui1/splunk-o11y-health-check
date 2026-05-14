@@ -1657,7 +1657,7 @@ def main() -> int:
     )
     inactive_mts_max_evaluations = max(1, min(inactive_mts_max_evaluations, 50))
     apm_trace_checks = (not args.no_apm_trace_checks) and profile_bool(
-        profile.get("health_check_apm_trace_checks"), True
+        profile.get("health_check_apm_trace_checks"), False
     )
     keep_intermediate = args.keep_intermediate_json or profile_bool(
         profile.get("health_check_keep_intermediate_json"), False
@@ -1935,7 +1935,12 @@ def main() -> int:
             *common,
         ]
         if apm_trace_checks:
-            apm_argv.append("--trace-checks")
+            apm_argv.extend([
+                "--trace-checks",
+                "--minimal-spans-max-full-traces", "100",
+                "--span-size-max-traces", "60",
+                "--span-size-max-operations-per-service", "15",
+            ])
             logger.info("APM trace checks enabled (minimal_spans + large_span_sizes, etc.)")
         else:
             logger.info("APM trace checks disabled (faster run)")

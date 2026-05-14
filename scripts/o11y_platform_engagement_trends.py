@@ -220,17 +220,17 @@ def _read_entitlement_flags(license_json_path: str | None) -> tuple[bool, bool, 
     ``note`` is ``ok``, ``missing_file``, ``invalid_json``, or ``no_rows``.
     """
     if not license_json_path:
-        return False, False, False, False, "missing_file"
+        return True, True, True, True, "missing_file"
     p = Path(license_json_path)
     if not p.is_file():
-        return False, False, False, False, "missing_file"
+        return True, True, True, True, "missing_file"
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False, False, False, False, "invalid_json"
+        return True, True, True, True, "invalid_json"
     rows = list(data.get("rows") or [])
     if not rows:
-        return False, False, False, False, "no_rows"
+        return True, True, True, True, "no_rows"
     disp = filter_license_rows_for_subscription_report(rows)
     show_apm = any(
         str(r.get("product") or "").strip() == "APM" and row_has_positive_subscription_allowance(r) for r in disp

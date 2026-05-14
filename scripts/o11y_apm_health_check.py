@@ -789,15 +789,18 @@ def enrich_health_endpoints_with_request_counts(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """
     One GraphQL call per distinct (service, environment); fill ``requestCountWindow`` on each row.
+    Calls are issued in parallel (up to 8 workers).
     """
     extra_findings: list[str] = []
     if not rows:
         return rows, extra_findings
 
-    pairs: set[tuple[str, str]] = {(str(r["service"]), str(r["environment"])) for r in rows}
+    pairs: list[tuple[str, str]] = sorted(
+        {(str(r["service"]), str(r["environment"])) for r in rows}
+    )
     cache: dict[tuple[str, str], dict[str, float]] = {}
 
-    for svc, env in sorted(pairs):
+    def _fetch_pair(svc: str, env: str) -> tuple[tuple[str, str], dict[str, float], str | None]:
         filter_tags: list[dict[str, Any]] = [{"tagName": "sf_service", "values": [svc]}]
         if env is not None and str(env).strip() != "":
             filter_tags.append({"tagName": "sf_environment", "values": [str(env)]})
@@ -810,16 +813,19 @@ def enrich_health_endpoints_with_request_counts(
                 filter_tags=filter_tags,
             )
             if raw.get("errors"):
-                extra_findings.append(
-                    f"Request counts could not be loaded for {svc}/{env} (endpoint breakdown unavailable)."
-                )
-            cache[(svc, env)] = parse_endpoints_breakdown_nodes(raw)
+                return (svc, env), {}, f"Request counts could not be loaded for {svc}/{env} (endpoint breakdown unavailable)."
+            return (svc, env), parse_endpoints_breakdown_nodes(raw), None
         except Exception as e:
-            extra_findings.append(
-                f"Request counts could not be loaded for {svc}/{env} (endpoint breakdown request failed)."
-            )
-            cache[(svc, env)] = {}
-        time.sleep(0.35)
+            return (svc, env), {}, f"Request counts could not be loaded for {svc}/{env} (endpoint breakdown request failed)."
+
+    workers = max(1, min(8, len(pairs)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(_fetch_pair, svc, env) for svc, env in pairs]
+        for fut in concurrent.futures.as_completed(futs):
+            key, ep_map, err = fut.result()
+            cache[key] = ep_map
+            if err:
+                extra_findings.append(err)
 
     for r in rows:
         svc, env, op = str(r["service"]), str(r["environment"]), str(r.get("endpointName") or "")
@@ -1642,6 +1648,7 @@ def collect_stratified_trace_ids(
 ) -> tuple[list[str], list[str], list[dict[str, Any]], int, bool]:
     """
     Returns: trace_ids, finding_lines, endpoint_shortfall, search_calls, stopped_by_cap.
+    Searches are issued in parallel (one worker per service).
     """
     findings: list[str] = []
     trace_ids_ordered: list[str] = []
@@ -1650,10 +1657,9 @@ def collect_stratified_trace_ids(
     search_calls = 0
     stopped_by_cap = False
 
+    # Build full work list first (svc → ops pairs), then search in parallel per service.
+    svc_ops: list[tuple[str, list[tuple[str, float]]]] = []
     for svc in svc_list:
-        if len(trace_ids_ordered) >= max_trace_fetches:
-            stopped_by_cap = True
-            break
         ops_ranked = operations_ranked_for_service(
             rollup,
             svc,
@@ -1662,60 +1668,76 @@ def collect_stratified_trace_ids(
         )
         if not ops_ranked:
             findings.append(f"No eligible operations for `{svc}` in this view — skipped.")
-            continue
-        for op, vol in ops_ranked:
-            if len(trace_ids_ordered) >= max_trace_fetches:
-                stopped_by_cap = True
-                break
+        else:
+            svc_ops.append((svc, ops_ranked))
+
+    def _search_svc(svc: str, ops: list[tuple[str, float]]) -> tuple[
+        str, list[str], list[dict[str, Any]], list[str], int
+    ]:
+        """Search all ops for one service; returns (svc, trace_ids, shortfalls, findings, n_calls)."""
+        local_ids: list[str] = []
+        local_seen: set[str] = set()
+        local_shortfall: list[dict[str, Any]] = []
+        local_findings: list[str] = []
+        n_calls = 0
+        for op, vol in ops:
             need = traces_per_endpoint
             collected = 0
-            search_calls += 1
+            n_calls += 1
             try:
                 r = apm_search_traces(
-                    app_base,
-                    token,
-                    start_ms,
-                    end_ms,
+                    app_base, token, start_ms, end_ms,
                     limit=max(need + 5, 12),
                     services=[svc],
                     operations=[op],
                 )
             except RuntimeError as e:
-                findings.append(f"Trace lookup failed for `{svc}` / `{op[:48]}`: {str(e)[:200]}")
-                endpoint_shortfall.append(
-                    {"service": svc, "operation": op, "collected": 0, "target": need, "error": True}
-                )
-                time.sleep(sleep_between_fetch_s)
+                local_findings.append(f"Trace lookup failed for `{svc}` / `{op[:48]}`: {str(e)[:200]}")
+                local_shortfall.append({"service": svc, "operation": op, "collected": 0, "target": need, "error": True})
                 continue
             if r.get("error"):
-                findings.append(f"{svc} / {op[:48]}: {r.get('error')}")
-                endpoint_shortfall.append(
-                    {"service": svc, "operation": op, "collected": 0, "target": need, "error": True}
-                )
-                time.sleep(sleep_between_fetch_s)
+                local_findings.append(f"{svc} / {op[:48]}: {r.get('error')}")
+                local_shortfall.append({"service": svc, "operation": op, "collected": 0, "target": need, "error": True})
                 continue
             for ex in r.get("traces") or []:
                 if not isinstance(ex, dict):
                     continue
                 tid = trace_example_trace_id(ex)
-                if not tid or tid in seen:
+                if not tid or tid in local_seen:
                     continue
-                seen.add(tid)
-                trace_ids_ordered.append(tid)
+                local_seen.add(tid)
+                local_ids.append(tid)
                 collected += 1
-                if collected >= need or len(trace_ids_ordered) >= max_trace_fetches:
+                if collected >= need:
                     break
             if collected < need:
-                endpoint_shortfall.append(
-                    {
-                        "service": svc,
-                        "operation": op,
-                        "collected": collected,
-                        "target": need,
-                        "rollup_volume": round(vol, 2),
-                    }
-                )
-            time.sleep(sleep_between_fetch_s)
+                local_shortfall.append({
+                    "service": svc, "operation": op,
+                    "collected": collected, "target": need,
+                    "rollup_volume": round(vol, 2),
+                })
+        return svc, local_ids, local_shortfall, local_findings, n_calls
+
+    workers = max(1, min(8, len(svc_ops)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(_search_svc, svc, ops) for svc, ops in svc_ops]
+        # Collect in svc_list order to keep trace ordering deterministic
+        svc_results: dict[str, tuple] = {}
+        for fut in concurrent.futures.as_completed(futs):
+            svc, ids, shortfall, fnd, n_calls = fut.result()
+            svc_results[svc] = (ids, shortfall, fnd, n_calls)
+
+    for svc, _ in svc_ops:
+        if svc not in svc_results:
+            continue
+        ids, shortfall, fnd, n_calls = svc_results[svc]
+        search_calls += n_calls
+        findings.extend(fnd)
+        endpoint_shortfall.extend(shortfall)
+        for tid in ids:
+            if tid not in seen:
+                seen.add(tid)
+                trace_ids_ordered.append(tid)
             if len(trace_ids_ordered) >= max_trace_fetches:
                 stopped_by_cap = True
                 break
@@ -3125,51 +3147,70 @@ def _apm_run_checks_after_profile_loaded(
         sf_max_pts = max(5_000, int(args.signalflow_max_data_points))
         spans_sf_stop_reason: str | None = None
 
-        if need_sf:
-            spans_program = (
-                "data('spans.count').sum(by=['sf_service','sf_operation','sf_environment'])"
-                ".publish(label='apm')"
+        need_traces_rollup = bool(want & {"usage_by_service", "minimal_spans"})
+        sf_wall = float(args.signalflow_wall_seconds)
+
+        # Run SignalFlow queries + topology POST concurrently — all three are independent.
+        spans_program = (
+            "data('spans.count').sum(by=['sf_service','sf_operation','sf_environment'])"
+            ".publish(label='apm')"
+            if need_sf else None
+        )
+        traces_program = (
+            "data('traces.count').sum(by=['sf_service','sf_environment']).publish(label='tr')"
+            if (need_sf and need_traces_rollup) else None
+        )
+
+        def _run_spans_sf() -> tuple:
+            return signalflow_matrix_collect(
+                stream_url=stream_base,
+                token=token,
+                program=spans_program,
+                start_ms=start_ms,
+                stop_ms=stop_ms,
+                resolution_ms=APM_SIGNALFLOW_RESOLUTION_MS,
+                wall_seconds=sf_wall,
+                max_data_points=sf_max_pts,
             )
-            need_traces_rollup = bool(want & {"usage_by_service", "minimal_spans"})
-            traces_program = (
-                "data('traces.count').sum(by=['sf_service','sf_environment']).publish(label='tr')"
-                if need_traces_rollup else None
+
+        def _run_traces_sf() -> tuple:
+            return signalflow_matrix_collect(
+                stream_url=stream_base,
+                token=token,
+                program=traces_program,
+                start_ms=start_ms,
+                stop_ms=stop_ms,
+                resolution_ms=APM_SIGNALFLOW_RESOLUTION_MS,
+                wall_seconds=min(sf_wall, 45.0),
+                max_data_points=sf_max_pts,
             )
 
-            sf_wall = float(args.signalflow_wall_seconds)
+        def _run_topology() -> dict[str, Any]:
+            return topology_post(api_base, token, time_iso)
 
-            # Run spans.count and traces.count SignalFlow queries concurrently
-            def _run_spans_sf() -> tuple:
-                return signalflow_matrix_collect(
-                    stream_url=stream_base,
-                    token=token,
-                    program=spans_program,
-                    start_ms=start_ms,
-                    stop_ms=stop_ms,
-                    resolution_ms=APM_SIGNALFLOW_RESOLUTION_MS,
-                    wall_seconds=sf_wall,
-                    max_data_points=sf_max_pts,
-                )
+        init_workers = (
+            (1 if need_sf else 0)
+            + (1 if (need_sf and need_traces_rollup) else 0)
+            + (1 if need_topology else 0)
+        )
+        spans_sf_result = traces_sf_result = topology_result = topology_error = None
+        if init_workers > 0:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, init_workers)) as init_pool:
+                spans_fut = init_pool.submit(_run_spans_sf) if need_sf else None
+                traces_fut = init_pool.submit(_run_traces_sf) if (need_sf and need_traces_rollup) else None
+                topo_fut = init_pool.submit(_run_topology) if need_topology else None
+                if spans_fut:
+                    spans_sf_result = spans_fut.result()
+                if traces_fut:
+                    traces_sf_result = traces_fut.result()
+                if topo_fut:
+                    try:
+                        topology_result = topo_fut.result()
+                    except RuntimeError as e:
+                        topology_error = str(e)
 
-            def _run_traces_sf() -> tuple:
-                return signalflow_matrix_collect(
-                    stream_url=stream_base,
-                    token=token,
-                    program=traces_program,
-                    start_ms=start_ms,
-                    stop_ms=stop_ms,
-                    resolution_ms=APM_SIGNALFLOW_RESOLUTION_MS,
-                    wall_seconds=min(sf_wall, 45.0),
-                    max_data_points=sf_max_pts,
-                )
-
-            sf_workers = 2 if need_traces_rollup else 1
-            with concurrent.futures.ThreadPoolExecutor(max_workers=sf_workers) as sf_pool:
-                spans_fut = sf_pool.submit(_run_spans_sf)
-                traces_fut = sf_pool.submit(_run_traces_sf) if need_traces_rollup else None
-                meta, dps, err, sr = spans_fut.result()
-                traces_sf_result = traces_fut.result() if traces_fut else None
-
+        if need_sf and spans_sf_result is not None:
+            meta, dps, err, sr = spans_sf_result
             spans_sf_stop_reason = sr
             if err:
                 checks_out["_signalflow_error"] = {
@@ -3188,25 +3229,25 @@ def _apm_run_checks_after_profile_loaded(
                         sf_max_pts,
                     )
 
-            # traces.count rollup is used by usage_by_service and (when present) to rank minimal_spans sampling.
-            if need_traces_rollup and traces_sf_result is not None:
-                tmeta, tdps, terr, _tsr = traces_sf_result
-                if not terr:
-                    tr = rollup_spans_by_dims(tmeta, tdps)
-                    traces_rollup = defaultdict(float)
-                    for (svc, _op, env), val in tr.items():
-                        if svc:
-                            traces_rollup[(svc, env)] += val
-                    traces_rollup = dict(traces_rollup)
-                if traces_rollup is not None and not traces_rollup:
-                    traces_rollup = None
+        # traces.count rollup is used by usage_by_service and (when present) to rank minimal_spans sampling.
+        if need_traces_rollup and traces_sf_result is not None:
+            tmeta, tdps, terr, _tsr = traces_sf_result
+            if not terr:
+                tr = rollup_spans_by_dims(tmeta, tdps)
+                traces_rollup = defaultdict(float)
+                for (svc, _op, env), val in tr.items():
+                    if svc:
+                        traces_rollup[(svc, env)] += val
+                traces_rollup = dict(traces_rollup)
+            if traces_rollup is not None and not traces_rollup:
+                traces_rollup = None
 
         if need_topology:
-            try:
-                topology = topology_post(api_base, token, time_iso)
-            except RuntimeError as e:
-                topology = {"data": {"nodes": [], "edges": []}, "error": str(e)}
-                checks_out["_topology_error"] = str(e)
+            if topology_error is not None:
+                topology = {"data": {"nodes": [], "edges": []}, "error": topology_error}
+                checks_out["_topology_error"] = topology_error
+            else:
+                topology = topology_result or {}
             data = topology.get("data") or topology
             for n in data.get("nodes") or []:
                 if isinstance(n, dict):
@@ -3447,16 +3488,25 @@ def _apm_run_checks_after_profile_loaded(
                     return 1
             else:
                 subscription_ts_ms = default_subscription_usage_timestamp_ms(stop_ms)
+            _sub_ts = str(subscription_ts_ms)
+
+            def _fetch_sub_tags() -> dict[str, Any]:
+                return apm_graphql_get_subscription_usage_tags(app_base, token, _sub_ts)
+
+            def _fetch_get_tags() -> dict[str, Any]:
+                return apm_graphql_get_tags(app_base, token)
+
             try:
-                raw_tags = apm_graphql_get_subscription_usage_tags(
-                    app_base, token, str(subscription_ts_ms)
-                )
-                raw_get_tags: dict[str, Any] | None = None
-                get_tags_error: str | None = None
-                try:
-                    raw_get_tags = apm_graphql_get_tags(app_base, token)
-                except RuntimeError as e:
-                    get_tags_error = str(e)[:400]
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as tag_pool:
+                    sub_fut = tag_pool.submit(_fetch_sub_tags)
+                    gt_fut = tag_pool.submit(_fetch_get_tags)
+                    raw_tags = sub_fut.result()
+                    raw_get_tags: dict[str, Any] | None = None
+                    get_tags_error: str | None = None
+                    try:
+                        raw_get_tags = gt_fut.result()
+                    except RuntimeError as e:
+                        get_tags_error = str(e)[:400]
                 checks_out["tags_high_cardinality"] = check_tags_high_cardinality(
                     raw_tags,
                     timestamp_ms=subscription_ts_ms,

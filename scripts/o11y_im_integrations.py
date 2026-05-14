@@ -27,6 +27,7 @@ import os
 import sys
 import urllib.error
 import urllib.parse
+import http.client
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -129,7 +130,7 @@ def _get_json(url: str, token: str) -> tuple[Any | None, str | None]:
     except urllib.error.HTTPError as e:
         err = (e.read() or b"").decode("utf-8", errors="replace")
         return None, f"HTTP {e.code}: {err[:2000]}"
-    except OSError as e:
+    except (OSError, http.client.IncompleteRead) as e:
         return None, str(e)
     try:
         return json.loads(raw), None

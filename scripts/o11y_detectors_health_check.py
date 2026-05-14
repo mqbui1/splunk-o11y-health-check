@@ -32,6 +32,7 @@ import os
 import re
 import sys
 import time
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -216,7 +217,7 @@ def api_get(token: str, realm: str, path: str, params: dict[str, Any] | None = N
     except urllib.error.HTTPError as e:
         err = (e.read() or b"").decode("utf-8", errors="replace")
         return None, f"HTTP {e.code} {path}: {err[:1500]}"
-    except OSError as e:
+    except (OSError, http.client.IncompleteRead) as e:
         return None, str(e)
     if not raw.strip():
         return None, None
@@ -242,7 +243,7 @@ def app_get(token: str, realm: str, path: str, params: dict[str, Any] | None = N
     except urllib.error.HTTPError as e:
         err = (e.read() or b"").decode("utf-8", errors="replace")
         return None, f"HTTP {e.code} {path}: {err[:1500]}"
-    except OSError as e:
+    except (OSError, http.client.IncompleteRead) as e:
         return None, str(e)
     if not raw.strip():
         return None, None

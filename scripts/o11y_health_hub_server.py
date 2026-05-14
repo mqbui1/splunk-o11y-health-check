@@ -17,6 +17,7 @@ Open http://127.0.0.1:8766
 from __future__ import annotations
 
 import calendar
+import http.client
 import json
 import os
 import re
@@ -25,6 +26,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -1259,97 +1262,84 @@ def create_app():
 
     def _run_metricset_breakdown(token: str, realm: str, hours: int = 1) -> tuple[dict, str | None]:
         """
-        Run SignalFlow for MMS + TMS org metrics broken down by sf_service + sf_environment.
-        Returns ({rows, totals, ...}, error_str | None).
+        Fetch MMS/TMS breakdown per service+environment via /v2/metrictimeseries catalog.
+        MMS = service.request.{count,duration.ns.*} (RED metrics)
+        TMS = spans.count
         """
-        import importlib as _imp
+        MMS_METRICS = {
+            "service.request.count",
+            "service.request.duration.ns.p99",
+            "service.request.duration.ns.p90",
+            "service.request.duration.ns.median",
+        }
+        TMS_METRICS = {"spans.count"}
+        ALL_METRICS = list(MMS_METRICS | TMS_METRICS)
 
-        try:
-            apm_mod = _imp.import_module("o11y_apm_health_check")
-            sf_collect = apm_mod.signalflow_matrix_collect
-        except Exception as e:
-            return {}, f"Cannot import apm module: {e}"
+        api_base_url = f"https://api.{realm}.signalfx.com"
 
-        stream_url = f"https://stream.{realm}.signalfx.com"
-        now_ms = int(time.time() * 1000)
-        start_ms = now_ms - hours * 3600 * 1000
-        resolution_ms = 60_000  # 1-min rollup
-
-        # (service, env) -> {mms, tms}
-        results: dict[tuple, dict] = {}
-
-        for metric_key, label in [
-            ("sf.org.apm.numMonitoringMetricSets", "mms"),
-            ("sf.org.apm.numTroubleshootingMetricSets", "tms"),
-        ]:
-            program = (
-                f"data('{metric_key}')"
-                ".mean(by=['sf_service','sf_environment'])"
-                f".publish(label='{label}')"
+        def _api_get(path: str) -> tuple[dict | None, str | None]:
+            req = urllib.request.Request(
+                f"{api_base_url}{path}",
+                headers={"X-SF-Token": token, "Accept": "application/json"},
+                method="GET",
             )
             try:
-                meta, pts, err, _ = sf_collect(
-                    stream_url=stream_url,
-                    token=token,
-                    program=program,
-                    start_ms=start_ms,
-                    stop_ms=now_ms,
-                    resolution_ms=resolution_ms,
-                    wall_seconds=30.0,
-                    read_timeout=30.0,
-                    max_data_points=20_000,
-                )
-            except Exception as e:
-                return {}, f"SignalFlow error for {metric_key}: {e}"
-            if err:
-                return {}, f"SignalFlow error for {metric_key}: {err}"
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return json.loads(resp.read().decode("utf-8")), None
+            except urllib.error.HTTPError as e:
+                body = (e.read() or b"").decode("utf-8", errors="replace")
+                return None, f"HTTP {e.code}: {body[:300]}"
+            except (OSError, http.client.IncompleteRead) as e:
+                return None, str(e)
 
-            # Average value per tsid across all time buckets
-            tsid_vals: dict[str, list[float]] = {}
-            for pt in pts:
-                tsid_vals.setdefault(pt["tsId"], []).append(pt["value"])
+        import urllib.parse as _up
 
-            for tsid, vals in tsid_vals.items():
-                props = meta.get(tsid, {})
-                svc = str(props.get("sf_service") or props.get("service") or "unknown")
-                env = str(props.get("sf_environment") or props.get("environment") or "unknown")
-                key = (svc, env)
-                if key not in results:
-                    results[key] = {"service": svc, "environment": env, "mms": 0.0, "tms": 0.0}
-                results[key][label] = round(sum(vals) / len(vals), 1)
+        # env -> svc -> {mms, tms}
+        summary: dict[str, dict[str, dict[str, int]]] = {}
+        metric_totals: dict[str, int] = {}
 
-        rows = sorted(results.values(), key=lambda r: -(r["mms"] + r["tms"]))
-        total_mms = round(sum(r["mms"] for r in rows), 1)
-        total_tms = round(sum(r["tms"] for r in rows), 1)
-
-        # Org-level totals (no by-dimension — single series per metric)
-        org_mms, org_tms = total_mms, total_tms
-        for metric_key, field in [
-            ("sf.org.apm.numMonitoringMetricSets", "org_mms"),
-            ("sf.org.apm.numTroubleshootingMetricSets", "org_tms"),
-        ]:
-            program = f"data('{metric_key}').mean().publish(label='v')"
-            try:
-                _, pts, _, _ = sf_collect(
-                    stream_url=stream_url,
-                    token=token,
-                    program=program,
-                    start_ms=start_ms,
-                    stop_ms=now_ms,
-                    resolution_ms=resolution_ms,
-                    wall_seconds=20.0,
-                    read_timeout=20.0,
-                    max_data_points=500,
-                )
-                if pts:
-                    vals2 = [p["value"] for p in pts]
-                    v = round(sum(vals2) / len(vals2), 1)
-                    if field == "org_mms":
-                        org_mms = v
+        for metric in ALL_METRICS:
+            offset = 0
+            metric_total = 0
+            while True:
+                qs = _up.urlencode({"query": f"sf_metric:{metric}", "limit": 100, "offset": offset})
+                data, err = _api_get(f"/v2/metrictimeseries?{qs}")
+                if err:
+                    return {}, f"MTS catalog error for {metric}: {err}"
+                results_page = data.get("results") or []
+                if not results_page:
+                    break
+                for r in results_page:
+                    if not r.get("active"):
+                        continue
+                    dims = r.get("dimensions") or {}
+                    env = str(dims.get("sf_environment") or "unknown")
+                    svc = str(dims.get("sf_service") or "(none)")
+                    if env not in summary:
+                        summary[env] = {}
+                    if svc not in summary[env]:
+                        summary[env][svc] = {"mms": 0, "tms": 0}
+                    if metric in MMS_METRICS:
+                        summary[env][svc]["mms"] += 1
+                        metric_total += 1
                     else:
-                        org_tms = v
-            except Exception:
-                pass
+                        summary[env][svc]["tms"] += 1
+                        metric_total += 1
+                if len(results_page) < 100:
+                    break
+                offset += len(results_page)
+            metric_totals[metric] = metric_total
+
+        rows = []
+        for env, svcs in sorted(summary.items()):
+            for svc, counts in sorted(svcs.items(), key=lambda x: -(x[1]["mms"] + x[1]["tms"])):
+                rows.append({"service": svc, "environment": env, "mms": counts["mms"], "tms": counts["tms"]})
+
+        rows.sort(key=lambda r: -(r["mms"] + r["tms"]))
+        total_mms = sum(r["mms"] for r in rows)
+        total_tms = sum(r["tms"] for r in rows)
+        org_mms = sum(v for k, v in metric_totals.items() if k in MMS_METRICS)
+        org_tms = sum(v for k, v in metric_totals.items() if k in TMS_METRICS)
 
         return {
             "rows": rows,

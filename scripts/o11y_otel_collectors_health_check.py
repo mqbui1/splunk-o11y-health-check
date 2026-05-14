@@ -24,6 +24,7 @@ import sys
 import time
 import urllib.error
 import urllib.parse
+import http.client
 import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
@@ -191,7 +192,7 @@ def fetch_splunk_otel_release_publish_dates(
         except urllib.error.HTTPError as e:
             body = (e.read() or b"").decode("utf-8", errors="replace")[:500]
             return out, f"GitHub HTTP {e.code}: {body}"
-        except OSError as e:
+        except (OSError, http.client.IncompleteRead) as e:
             return out, str(e)
         try:
             batch = json.loads(raw)
