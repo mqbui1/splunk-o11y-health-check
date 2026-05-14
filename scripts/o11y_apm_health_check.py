@@ -2901,9 +2901,9 @@ def main() -> int:
     p.add_argument(
         "--signalflow-wall-seconds",
         type=float,
-        default=45.0,
+        default=30.0,
         metavar="SEC",
-        help="Max wall-clock seconds to stream each SignalFlow query (default 45). "
+        help="Max wall-clock seconds to stream each SignalFlow query (default 30). "
         "Lower = faster but may truncate rollups for very large orgs.",
     )
     p.add_argument("--realm", default=None, help="Realm (default: profile or SPLUNK_REALM or us0)")

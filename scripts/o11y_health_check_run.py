@@ -1237,6 +1237,14 @@ def main() -> int:
         "health_check_apm_signalflow_max_data_points in profile, else 300000)",
     )
     p.add_argument(
+        "--apm-signalflow-wall-seconds",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Max wall-clock seconds per APM SignalFlow query (default: "
+        "health_check_apm_signalflow_wall_seconds in profile, else 30)",
+    )
+    p.add_argument(
         "--rum-lookback-hours",
         type=int,
         default=None,
@@ -1541,6 +1549,12 @@ def main() -> int:
         else profile_int(profile.get("health_check_apm_signalflow_max_data_points"), 300_000)
     )
     apm_sf_max_pts = max(5_000, min(apm_sf_max_pts, 2_000_000))
+    apm_sf_wall = (
+        args.apm_signalflow_wall_seconds
+        if args.apm_signalflow_wall_seconds is not None
+        else float(profile.get("health_check_apm_signalflow_wall_seconds") or 30.0)
+    )
+    apm_sf_wall = max(5.0, min(apm_sf_wall, 120.0))
     rum_lookback_h = (
         args.rum_lookback_hours
         if args.rum_lookback_hours is not None
@@ -1912,6 +1926,8 @@ def main() -> int:
             str(max(1, apm_hours)),
             "--signalflow-max-data-points",
             str(apm_sf_max_pts),
+            "--signalflow-wall-seconds",
+            str(apm_sf_wall),
             "--checks",
             "all",
             "--json-out",
