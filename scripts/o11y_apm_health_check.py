@@ -957,14 +957,25 @@ def signalflow_matrix_collect(
             return False
         return False
 
+    # Use wall_seconds as the per-read socket timeout so readline() cannot block
+    # longer than the overall wall budget. This ensures the wall_seconds check
+    # actually fires even when SignalFlow is slow to send data between bursts.
+    per_read_timeout = max(5.0, min(wall_seconds, read_timeout))
     try:
-        with urllib.request.urlopen(req, timeout=read_timeout + 30) as resp:
+        with urllib.request.urlopen(req, timeout=per_read_timeout) as resp:
             block: list[str] = []
             while True:
                 if time.monotonic() - t0 > wall_seconds:
                     stop_reason = stop_reason or "wall_timeout"
                     break
-                line_b = resp.readline()
+                try:
+                    line_b = resp.readline()
+                except TimeoutError:
+                    stop_reason = stop_reason or "wall_timeout"
+                    break
+                except OSError:
+                    stop_reason = stop_reason or "wall_timeout"
+                    break
                 if not line_b:
                     break
                 raw_bytes += len(line_b)
