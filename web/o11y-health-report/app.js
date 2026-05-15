@@ -1278,6 +1278,32 @@ function peKpiIconSvg(kpiId, accent) {
 // ── Custom Metrics panel: inject live breakdown, replacing the static IM table ─
 
 /**
+ * Remove the static "Metric Cardinality & Volume" section from the IM markdown body.
+ * Removes h3/h4 headings whose text is "Metric Cardinality & Volume", "Results", or
+ * "Recommendation" (within the IM section only), plus the paragraph and empty nodes
+ * that follow each heading up to the next heading.
+ */
+function _removeImCardinalitySectionContent(containerEl) {
+  if (!containerEl) return;
+  const REMOVE_HEADS = new Set(["metric cardinality & volume", "results", "recommendation"]);
+  const nodes = [...containerEl.childNodes];
+  let removing = false;
+  for (const node of nodes) {
+    if (node.nodeType === Node.ELEMENT_NODE && /^H[3-4]$/.test(node.tagName)) {
+      const txt = node.textContent.trim().toLowerCase();
+      if (REMOVE_HEADS.has(txt)) {
+        removing = true;
+        node.remove();
+        continue;
+      } else {
+        removing = false;
+      }
+    }
+    if (removing) node.remove();
+  }
+}
+
+/**
  * Create and inject the live custom-metrics panel into `sectionBodyEl` (the IM
  * section's .markdown-body).  Idempotent — safe to call multiple times.
  * Returns the panel element.
@@ -1301,16 +1327,23 @@ function peInjectCustomMetricsPanel(sectionBodyEl) {
   panel.className = "pe-cm-inline-panel";
 
   if (imWrap) {
+    const imParent = imWrap.parentElement || sectionBodyEl;
     imWrap.before(panel);
     imWrap.remove();
+    // Remove the surrounding static section headings and text — the live panel replaces all of it
+    _removeImCardinalitySectionContent(imParent);
   } else if (sectionBodyEl) {
+    _removeImCardinalitySectionContent(sectionBodyEl);
     sectionBodyEl.prepend(panel);
   } else {
     const imAnchorFb = [...document.querySelectorAll("article[id]")].find((el) =>
       (el.querySelector("h2")?.textContent || "").toLowerCase().includes("infrastructure monitoring")
     );
     const sectionBody = imAnchorFb?.querySelector(".section-card__body") || imAnchorFb;
-    if (sectionBody) sectionBody.prepend(panel);
+    if (sectionBody) {
+      _removeImCardinalitySectionContent(sectionBody);
+      sectionBody.prepend(panel);
+    }
   }
 
   const hasJob = !!new URLSearchParams(window.location.search).get("hubJob");
@@ -1326,10 +1359,17 @@ function peInjectCustomMetricsPanel(sectionBodyEl) {
          <option value="P30D">30 days</option>
        </select>`;
 
+  const assessmentDate = (STATE.meta && STATE.meta["Assessment date (UTC)"])
+    ? formatAssessmentDateUtc(STATE.meta["Assessment date (UTC)"])
+    : "";
+  const dateChip = assessmentDate
+    ? `<span class="pe-cm-inline-date-chip">Report date: ${escapeHtml(assessmentDate)}</span>`
+    : "";
+
   panel.innerHTML = `
     <div class="pe-cm-inline-header">
       <div>
-        <h3 class="pe-cm-inline-title">MTS full breakdown</h3>
+        <h3 class="pe-cm-inline-title">MTS full breakdown ${dateChip}</h3>
         <p class="pe-cm-inline-subtitle">All metrics fetched live from the Usage Analytics API, ranked by MTS volume. Filter by billing class using the dropdown.</p>
       </div>
       <div class="pe-drill-cm-controls" style="margin-top:0">
@@ -1415,10 +1455,17 @@ function peInjectMetricsetPanel(sectionBodyEl) {
          <option value="24">24 hours</option>
        </select>`;
 
+  const msAssessmentDate = (STATE.meta && STATE.meta["Assessment date (UTC)"])
+    ? formatAssessmentDateUtc(STATE.meta["Assessment date (UTC)"])
+    : "";
+  const msDateChip = msAssessmentDate
+    ? `<span class="pe-cm-inline-date-chip">Report date: ${escapeHtml(msAssessmentDate)}</span>`
+    : "";
+
   panel.innerHTML = `
     <div class="pe-cm-inline-header">
       <div>
-        <h3 class="pe-cm-inline-title">MetricSet breakdown by service &amp; environment</h3>
+        <h3 class="pe-cm-inline-title">MetricSet breakdown by service &amp; environment ${msDateChip}</h3>
         <p class="pe-cm-inline-subtitle">Monitoring MetricSet (MMS) and Troubleshooting MetricSet (TMS) counts per service and deployment environment, fetched live via SignalFlow.</p>
       </div>
       <div class="pe-drill-cm-controls" style="margin-top:0">
@@ -2544,11 +2591,6 @@ function buildPlatformEngagementKpiDeck(payload) {
     const showContributors =
       PE_KPI_DRILL_IDS.has(String(kpi.id)) && peDrilldownBlockHasContent(drillRaw);
 
-    card.setAttribute("tabindex", "0");
-    card.setAttribute("role", "button");
-    card.setAttribute("aria-label", `Drill down: ${String(kpi.label || kpi.id || "KPI")}`);
-    card.classList.add("pe-kpi-card--drillable");
-
     card.innerHTML = `
       <h4 class="pe-kpi-card__title">${escapeHtml(String(kpi.label || kpi.id || "KPI"))}</h4>
       <div class="pe-kpi-card__icon-ring" aria-hidden="true">
@@ -2567,7 +2609,7 @@ function buildPlatformEngagementKpiDeck(payload) {
                Contributors
              </button>
            </div>`
-        : `<span class="pe-kpi-card__drill-hint" aria-hidden="true">${isCustomMetricsTile ? "View MTS breakdown →" : "View breakdown →"}</span>`
+        : ""
       }
     `;
     // "Contributors" button → Ivan's <dialog> popup with contributor breakdown
@@ -2575,7 +2617,7 @@ function buildPlatformEngagementKpiDeck(payload) {
       const btn = card.querySelector(".pe-kpi-card__contributors");
       if (btn) {
         btn.addEventListener("click", (e) => {
-          e.stopPropagation(); // don't also fire the card click
+          e.stopPropagation();
           btn.setAttribute("aria-expanded", "true");
           openPlatformEngagementDrilldownDialog(kpi, payload, drillRaw, acc, delta);
           const dlg = document.getElementById("pe-drilldown-dialog");
@@ -2586,20 +2628,6 @@ function buildPlatformEngagementKpiDeck(payload) {
           if (dlg) dlg.addEventListener("close", onClose, { once: true });
         });
       }
-    }
-    // Card click → our full slide-in modal (custom_metrics scrolls to IM panel instead)
-    if (isCustomMetricsTile) {
-      card.setAttribute("aria-label", `Drill down: ${String(kpi.label || kpi.id || "KPI")} — view Custom metrics in IM table`);
-      const handler = () => peScrollToImCustomMetrics();
-      card.addEventListener("click", handler);
-      card.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handler(); }
-      });
-    } else {
-      card.addEventListener("click", () => peOpenKpiDrilldown(kpi, payload, acc));
-      card.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); peOpenKpiDrilldown(kpi, payload, acc); }
-      });
     }
     grid.appendChild(card);
   });
