@@ -248,6 +248,9 @@ def infer_distribution(service_name: str, _version: str) -> str:
         return "Unknown"
     if "splunk" in s or "signalfx" in s:
         return "Splunk"
+    # Splunk distro Helm chart deploys with service.name=otel-agent / otel-k8s-cluster-receiver
+    if s in ("otel-agent", "otel-k8s-cluster-receiver", "otel-gateway", "otel-collector"):
+        return "Splunk"
     if "otelcol" == s or s.startswith("otelcol") or "opentelemetry-collector" in s:
         return "OSS"
     return "Unknown"
@@ -266,7 +269,7 @@ def _prop_str(props: dict[str, Any], *keys: str) -> str:
 
 
 def host_id_from_props(props: dict[str, Any]) -> str:
-    return _prop_str(props, "host.id", "host_id") or "—"
+    return _prop_str(props, "host.id", "host_id", "k8s.pod.uid") or "—"
 
 
 def host_deployment_context_from_props(props: dict[str, Any]) -> str:
