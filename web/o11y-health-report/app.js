@@ -4080,6 +4080,11 @@ async function buildUI() {
     paginateAnalyzeIntegrationsTables(bodyEl);
     paginateDetectorHealthTables(bodyEl);
     paginateDashboardHealthTables(bodyEl);
+    bodyEl.querySelectorAll("table").forEach((t) => {
+      if (isDashboardHealthResultsTable(t)) {
+        t.querySelectorAll("a[href]").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
+      }
+    });
     paginateTokenHealthExpiredNearTables(bodyEl);
     if (!isLicenseUtilizationSectionTitle(sec.title)) {
       paginateRemainingHealthResultsTables(bodyEl);

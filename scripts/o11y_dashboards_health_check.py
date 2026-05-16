@@ -16,7 +16,6 @@ Environment: ``SPLUNK_ACCESS_TOKEN`` / profile ``access_token``; ``realm`` in pr
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import logging
 import os
@@ -115,6 +114,13 @@ def _md_cell(s: str) -> str:
     return str(s).replace("|", "\\|").replace("\n", " ")
 
 
+def _md_link(text: str, url: str) -> str:
+    """Markdown link safe for use inside GFM table cells."""
+    safe_text = text.replace("|", "\\|").replace("[", "\\[").replace("]", "\\]").replace("\n", " ")
+    safe_url = url.replace(")", "%29").replace(" ", "%20")
+    return f"[{safe_text}]({safe_url})"
+
+
 def _md_dashboard_name_cell(row: dict[str, Any], realm: str) -> str:
     """Dashboard Name column: link to UI when id + realm are available."""
     name = str(row.get("dashboardName") or "—").replace("\n", " ")
@@ -126,9 +132,7 @@ def _md_dashboard_name_cell(row: dict[str, Any], realm: str) -> str:
     url = dashboard_open_url(realm, did, gid, config_id=cfg) if realm and did else ""
     if not url:
         return _md_cell(name)
-    esc_href = html.escape(url, quote=True)
-    esc_text = html.escape(name, quote=False).replace("|", "&#124;")
-    return f'<a href="{esc_href}" target="_blank" rel="noopener noreferrer">{esc_text}</a>'
+    return _md_link(name, url)
 
 
 def _md_duplicate_dashboard_ids_cell(row: dict[str, Any], realm: str) -> str:
@@ -143,12 +147,10 @@ def _md_duplicate_dashboard_ids_cell(row: dict[str, Any], realm: str) -> str:
         if not o:
             continue
         url = dashboard_open_url(realm, o, gid, config_id=None) if realm else ""
-        esc_text = html.escape(o, quote=False).replace("|", "&#124;")
         if not url:
-            parts.append(esc_text)
+            parts.append(_md_cell(o))
             continue
-        esc_href = html.escape(url, quote=True)
-        parts.append(f'<a href="{esc_href}" target="_blank" rel="noopener noreferrer">{esc_text}</a>')
+        parts.append(_md_link(o, url))
     if row.get("duplicateDashboardIdsHasMore"):
         parts.append("…")
     return ", ".join(parts) if parts else "—"
