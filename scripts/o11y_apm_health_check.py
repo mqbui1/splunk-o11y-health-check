@@ -405,7 +405,7 @@ def splunk_post_json(
     body: dict[str, Any] | None,
     token: str,
     *,
-    timeout: float = 120.0,
+    timeout: float = 30.0,
 ) -> Any:
     url = f"{base_url.rstrip('/')}{path}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -458,7 +458,7 @@ def apm_graphql_get_subscription_usage_tags(
         "/v2/apm/graphql?op=GetSubscriptionUsageTags",
         body,
         token,
-        timeout=120.0,
+        timeout=30.0,
     )
 
 
@@ -574,7 +574,7 @@ def apm_graphql_get_tags(app_base: str, token: str) -> dict[str, Any]:
         "/v2/apm/graphql?op=getTags",
         body,
         token,
-        timeout=120.0,
+        timeout=30.0,
     )
 
 
@@ -735,7 +735,7 @@ def apm_graphql_endpoints_breakdown_over_time(
         "/v2/apm/graphql?op=EndpointsBreakdownOverTimeNode",
         body,
         token,
-        timeout=120.0,
+        timeout=30.0,
     )
 
 
@@ -1067,7 +1067,7 @@ def topology_post(api_base: str, token: str, time_range_iso: str) -> dict[str, A
         "/v2/apm/topology",
         {"timeRange": time_range_iso},
         token,
-        timeout=120.0,
+        timeout=30.0,
     )
 
 
@@ -1138,7 +1138,7 @@ def apm_search_traces(
         "/v2/apm/graphql?op=StartAnalyticsSearch",
         start_body,
         token,
-        timeout=120.0,
+        timeout=30.0,
     )
     job_id = (
         (start_result.get("data") or {}).get("startAnalyticsSearch") or {}
@@ -1162,7 +1162,7 @@ def apm_search_traces(
             "/v2/apm/graphql?op=GetAnalyticsSearch",
             get_body,
             token,
-            timeout=120.0,
+            timeout=30.0,
         )
         sections = (
             (poll.get("data") or {}).get("getAnalyticsSearch") or {}
@@ -1261,7 +1261,7 @@ def get_trace_full_graphql(app_base: str, token: str, trace_id: str) -> dict[str
         "/v2/apm/graphql?op=TraceFullDetailsLessValidation",
         body,
         token,
-        timeout=120.0,
+        timeout=30.0,
     )
 
 
@@ -1721,11 +1721,16 @@ def collect_stratified_trace_ids(
     workers = max(1, min(8, len(svc_ops)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futs = [pool.submit(_search_svc, svc, ops) for svc, ops in svc_ops]
-        # Collect in svc_list order to keep trace ordering deterministic
+        # Collect in svc_list order to keep trace ordering deterministic.
+        # Cap total wall time at 120s — if the APM API is unreachable (e.g. VPN/firewall)
+        # individual requests time out at 30s but many parallel fetches can still add up.
         svc_results: dict[str, tuple] = {}
-        for fut in concurrent.futures.as_completed(futs):
-            svc, ids, shortfall, fnd, n_calls = fut.result()
-            svc_results[svc] = (ids, shortfall, fnd, n_calls)
+        try:
+            for fut in concurrent.futures.as_completed(futs, timeout=120):
+                svc, ids, shortfall, fnd, n_calls = fut.result()
+                svc_results[svc] = (ids, shortfall, fnd, n_calls)
+        except concurrent.futures.TimeoutError:
+            logger.warning("APM trace collection timed out after 120s — APM API may be unreachable (VPN/firewall). Partial results only.")
 
     for svc, _ in svc_ops:
         if svc not in svc_results:

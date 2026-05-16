@@ -1123,7 +1123,7 @@ def main() -> int:
         "--otel-lookback-hours",
         type=int,
         default=None,
-        help="OTel SignalFlow window hours (default: health_check_otel_lookback_hours in profile, else 4)",
+        help="OTel SignalFlow window hours (default: health_check_otel_lookback_hours in profile, else 24)",
     )
     p.add_argument(
         "--otel-support-days",
@@ -1293,6 +1293,12 @@ def main() -> int:
         help="Dashboards: max dashboards to analyze (default: health_check_max_dashboards in profile, else 150)",
     )
     p.add_argument(
+        "--max-charts-per-dashboard",
+        type=int,
+        default=None,
+        help="Dashboards: max charts to fetch per dashboard via /v2/chart/{id} (default: health_check_max_charts_per_dashboard in profile, else 50)",
+    )
+    p.add_argument(
         "--max-synthetics-tests",
         type=int,
         default=None,
@@ -1422,7 +1428,7 @@ def main() -> int:
     otel_lookback_hours = (
         args.otel_lookback_hours
         if args.otel_lookback_hours is not None
-        else profile_int(profile.get("health_check_otel_lookback_hours"), 4)
+        else profile_int(profile.get("health_check_otel_lookback_hours"), 24)
     )
     otel_lookback_hours = max(1, min(otel_lookback_hours, 168))
     otel_support_days = (
@@ -1599,6 +1605,12 @@ def main() -> int:
         else profile_int(profile.get("health_check_max_dashboards"), 150)
     )
     dashboards_max = max(1, min(dashboards_max, 5000))
+    dashboards_charts_max = max(1, min(
+        args.max_charts_per_dashboard
+        if args.max_charts_per_dashboard is not None
+        else profile_int(profile.get("health_check_max_charts_per_dashboard"), 50),
+        500,
+    ))
     synthetics_max_tests = (
         args.max_synthetics_tests
         if args.max_synthetics_tests is not None
@@ -1911,6 +1923,8 @@ def main() -> int:
             str(_SCRIPT_DIR / "o11y_dashboards_health_check.py"),
             "--max-dashboards",
             str(dashboards_max),
+            "--max-charts-per-dashboard",
+            str(dashboards_charts_max),
             "--structured-json-out",
             str(dash_json),
             *common,

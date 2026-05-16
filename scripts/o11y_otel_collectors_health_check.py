@@ -393,6 +393,9 @@ def fetch_otel_inventory(
             host = host_from_props(props)
             ver = version_from_props(props)
             cname = collector_display_name(props)
+            # Capture service.instance.id for dedup key so multiple collectors on
+            # the same host (e.g. agent + gateway) are not collapsed into one row.
+            inst_id = _prop_str(props, "service.instance.id", "service_instance_id") or ""
             rows.append(
                 {
                     "hostName": host,
@@ -401,14 +404,18 @@ def fetch_otel_inventory(
                     "collectorName": cname,
                     "version": ver,
                     "uptimeSample": uptime,
+                    "_instanceId": inst_id,
                 }
             )
         if rows:
-            merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+            # Dedup key: (host, hostId, instanceId, version) — keeps distinct
+            # collector instances on the same host separate.
+            merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
             for r in rows:
                 k = (
                     str(r.get("hostName") or ""),
-                    str(r.get("collectorName") or ""),
+                    str(r.get("hostId") or ""),
+                    str(r.get("_instanceId") or ""),
                     str(r.get("version") or ""),
                 )
                 prev = merged.get(k)
@@ -422,6 +429,9 @@ def fetch_otel_inventory(
                 if ru > pu or (ru == pu and cr > cp):
                     merged[k] = r
             deduped = list(merged.values())
+            # Strip internal field before returning
+            for r in deduped:
+                r.pop("_instanceId", None)
             logger.info(
                 "OTel inventory OK (program %s/%s): %s datapoint(s), %s deduped collector row(s)",
                 idx,
@@ -629,7 +639,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description="OpenTelemetry Collectors health check (SignalFlow).")
     p.add_argument("--realm", default=None)
     p.add_argument("--profile", default=None)
-    p.add_argument("--lookback-hours", type=int, default=4, help="SignalFlow window (default 4).")
+    p.add_argument("--lookback-hours", type=int, default=24, help="SignalFlow window (default 24).")
     p.add_argument("--resolution-minutes", type=int, default=5, help="Rollup resolution (default 5).")
     p.add_argument("--min-splunk-version", default="0.90.0", help="Minimum Splunk distro semver (default 0.90.0).")
     p.add_argument("--min-oss-version", default="0.90.0", help="Minimum OSS collector semver (default 0.90.0).")

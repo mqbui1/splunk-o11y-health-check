@@ -1830,6 +1830,15 @@ details[open] .pe-drill-timeseries-summary::before {
   margin-top: 0.2rem;
 }
 
+.pe-drill-cm-stat--wide {
+  flex: 2 1 220px;
+}
+
+.pe-drill-cm-stat-num--sm {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
 /* Utilization stacked bar */
 .pe-drill-cm-section-head {
   margin: 0.75rem 0 0.4rem;
@@ -1931,10 +1940,17 @@ details[open] .pe-drill-timeseries-summary::before {
   white-space: nowrap;
 }
 
+/* Override .markdown-body table defaults that would clip or constrain the panel table */
+.markdown-body .pe-cm-table-wrap table,
 .pe-drill-cm-table {
   font-size: 0.78rem;
   width: 100%;
+  min-width: 900px;
   table-layout: auto;
+  overflow: visible;
+  box-shadow: none;
+  border-radius: 0;
+  margin: 0;
 }
 
 /* Column header tooltips */
@@ -1962,6 +1978,19 @@ details[open] .pe-drill-timeseries-summary::before {
 .pe-drill-cm-table td:nth-child(2) {
   min-width: 140px;
   white-space: nowrap;
+}
+
+/* Services and Environments columns — last two */
+.pe-drill-cm-table th:nth-last-child(1),
+.pe-drill-cm-table th:nth-last-child(2) {
+  min-width: 150px;
+  max-width: 220px;
+}
+.pe-drill-cm-table td:nth-last-child(1),
+.pe-drill-cm-table td:nth-last-child(2) {
+  min-width: 150px;
+  max-width: 220px;
+  white-space: normal;
 }
 
 .pe-drill-more-note {
@@ -2001,8 +2030,6 @@ details[open] .pe-drill-timeseries-summary::before {
 .pe-cm-table-wrap {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
-  /* Ensure all ancestors allow this to scroll */
-  position: relative;
 }
 
 /* Sortable column headers */
@@ -2066,6 +2093,16 @@ th.sort-asc .pe-sort-arrow, th.sort-desc .pe-sort-arrow { opacity: 1; }
 .pe-cm-svc-total { font-size: 0.68rem; color: var(--splunk-text-muted, #8b95a1); margin-top: 3px; }
 .pe-cm-svc-empty { color: var(--splunk-text-muted, #8b95a1); }
 .pe-cm-svc-loading { color: var(--splunk-text-muted, #8b95a1); font-size: 0.8rem; }
+.pe-cm-svc-more {
+  display: inline-block;
+  font-size: 0.68rem;
+  color: var(--splunk-accent, #5b75e0);
+  cursor: pointer;
+  margin: 1px 2px;
+  white-space: nowrap;
+}
+.pe-cm-svc-more:hover { text-decoration: underline; }
+.pe-cm-svc-overflow { display: inline; }
 .pe-cm-env-tag { background: #2e7d52 !important; }
 .pe-cm-token-banner {
   display: flex;
@@ -2188,6 +2225,47 @@ th.sort-asc .pe-sort-arrow, th.sort-desc .pe-sort-arrow { opacity: 1; }
   font-style: italic;
 }
 
+.pe-ms-expand-cell { width: 1.5rem; padding: 0 4px !important; }
+.pe-ms-expand-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.65rem;
+  color: var(--splunk-text-muted, #8b95a1);
+  padding: 2px 4px;
+  line-height: 1;
+}
+.pe-ms-expand-btn:hover { color: var(--splunk-accent, #5b75e0); }
+
+.pe-ms-detail-wrap {
+  background: var(--splunk-page-bg, #f4f5f7);
+  border-top: 1px solid var(--splunk-border);
+  padding: 0.5rem 1rem 0.5rem 2.5rem;
+}
+.pe-ms-detail-table {
+  width: auto;
+  font-size: 0.75rem;
+  border-collapse: collapse;
+}
+.pe-ms-detail-table th {
+  font-weight: 600;
+  color: var(--splunk-text-muted, #8b95a1);
+  text-transform: uppercase;
+  font-size: 0.65rem;
+  letter-spacing: 0.05em;
+  padding: 3px 12px 3px 0;
+  border-bottom: 1px solid var(--splunk-border);
+}
+.pe-ms-detail-table td { padding: 3px 12px 3px 0; }
+.pe-ms-metric-name { font-family: monospace; font-size: 0.72rem; }
+.pe-ms-metric-type {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #0d9488;
+  white-space: nowrap;
+}
+.pe-ms-metric-count { color: var(--splunk-text-muted, #8b95a1); white-space: nowrap; }
+
 /* ----- Custom metrics inline panel (injected into IM section) ----- */
 .pe-cm-inline-panel {
   margin: 0 0 1.75rem;
@@ -2242,6 +2320,14 @@ th.sort-asc .pe-sort-arrow, th.sort-desc .pe-sort-arrow { opacity: 1; }
 
 #pe-cm-inline-body {
   padding: 1rem 1.25rem 1.25rem;
+}
+
+/* The table wrap must break out of the body padding to be full-width scrollable */
+#pe-cm-inline-body .pe-cm-table-wrap {
+  margin-left: -1.25rem;
+  margin-right: -1.25rem;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Credential fallback form */

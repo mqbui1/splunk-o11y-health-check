@@ -736,7 +736,11 @@ def create_app():
             return jsonify({"error": "not found"}), HTTPStatus.NOT_FOUND
         if not candidate.is_file():
             return jsonify({"error": "not found"}), HTTPStatus.NOT_FOUND
-        return send_from_directory(str(VIEWER_DIR), filename)
+        resp = send_from_directory(str(VIEWER_DIR), filename)
+        if filename.endswith((".js", ".css")):
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            resp.headers["Pragma"] = "no-cache"
+        return resp
 
     @app.get("/api/jobs")
     def list_jobs():
@@ -1155,20 +1159,30 @@ def create_app():
             f"https://api.{realm}.signalfx.com/v2/metrictimeseries"
             f"?query={urllib.parse.quote(query)}&limit=200"
         )
-        try:
-            req = urllib.request.Request(url, headers={"X-SF-TOKEN": token, "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                body = json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            import sys
-            print(f"[metric-services] HTTP {e.code} for metric={metric_name!r} realm={realm!r} token_prefix={token[:8]!r}", file=sys.stderr)
-            if e.code in (401, 403):
-                return [], [], "token_required"
-            return [], [], f"HTTP {e.code}"
-        except Exception as e:
-            import sys
-            print(f"[metric-services] Exception for metric={metric_name!r}: {e}", file=sys.stderr)
-            return [], [], str(e)
+        import sys, time as _time
+        body = None
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(url, headers={"X-SF-TOKEN": token, "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    body = json.loads(resp.read().decode())
+                break
+            except urllib.error.HTTPError as e:
+                print(f"[metric-services] HTTP {e.code} attempt={attempt+1} metric={metric_name!r}", file=sys.stderr)
+                if e.code in (401, 403):
+                    return [], [], "token_required"
+                if e.code == 429 and attempt < 2:
+                    _time.sleep(1.5 * (attempt + 1))
+                    continue
+                return [], [], f"HTTP {e.code}"
+            except Exception as e:
+                print(f"[metric-services] Exception attempt={attempt+1} metric={metric_name!r}: {e}", file=sys.stderr)
+                if attempt < 2:
+                    _time.sleep(1.0)
+                    continue
+                return [], [], str(e)
+        if body is None:
+            return [], [], "no response"
 
         results = body.get("results") or []
         service_counts: dict[str, int] = {}
@@ -1176,14 +1190,16 @@ def create_app():
         for mts in results:
             dims = mts.get("dimensions") or {}
             svc = None
-            for key in ("service", "sf_service", "deployment.service", "k8s.deployment.name"):
+            for key in ("service", "sf_service", "deployment.service", "k8s.deployment.name",
+                        "k8s.container.name", "container.name", "k8s.namespace.name"):
                 val = dims.get(key)
                 if isinstance(val, str) and val.strip():
                     svc = val.strip()
                     break
             if svc:
                 service_counts[svc] = service_counts.get(svc, 0) + 1
-            for key in ("deployment.environment", "sf_environment", "environment"):
+            for key in ("deployment.environment", "sf_environment", "environment",
+                        "k8s.cluster.name", "host.name"):
                 val = dims.get(key)
                 if isinstance(val, str) and val.strip():
                     env_counts[val.strip()] = env_counts.get(val.strip(), 0) + 1
@@ -1292,48 +1308,56 @@ def create_app():
             except (OSError, http.client.IncompleteRead) as e:
                 return None, str(e)
 
+        import concurrent.futures as _cf
         import urllib.parse as _up
 
-        # env -> svc -> {mms, tms}
-        summary: dict[str, dict[str, dict[str, int]]] = {}
-        metric_totals: dict[str, int] = {}
-
-        for metric in ALL_METRICS:
+        def _fetch_metric(metric: str) -> tuple[str, list[dict], str | None]:
+            """Fetch all active MTS for one metric; returns (metric, records, error)."""
+            records: list[dict] = []
             offset = 0
-            metric_total = 0
             while True:
                 qs = _up.urlencode({"query": f"sf_metric:{metric}", "limit": 100, "offset": offset})
                 data, err = _api_get(f"/v2/metrictimeseries?{qs}")
                 if err:
-                    return {}, f"MTS catalog error for {metric}: {err}"
-                results_page = data.get("results") or []
-                if not results_page:
+                    # IncompleteRead/network error mid-pagination — use what we have so far
                     break
-                for r in results_page:
-                    if not r.get("active"):
-                        continue
-                    dims = r.get("dimensions") or {}
-                    env = str(dims.get("sf_environment") or "unknown")
-                    svc = str(dims.get("sf_service") or "(none)")
-                    if env not in summary:
-                        summary[env] = {}
-                    if svc not in summary[env]:
-                        summary[env][svc] = {"mms": 0, "tms": 0}
-                    if metric in MMS_METRICS:
-                        summary[env][svc]["mms"] += 1
-                        metric_total += 1
-                    else:
-                        summary[env][svc]["tms"] += 1
-                        metric_total += 1
-                if len(results_page) < 100:
+                page = data.get("results") or []
+                records.extend(r for r in page if r.get("active"))
+                if len(page) < 100:
                     break
-                offset += len(results_page)
-            metric_totals[metric] = metric_total
+                offset += len(page)
+            return metric, records, None
+
+        # Fetch all metrics in parallel
+        metric_records: dict[str, list[dict]] = {}
+        with _cf.ThreadPoolExecutor(max_workers=len(ALL_METRICS)) as pool:
+            for metric, records, _ in pool.map(_fetch_metric, ALL_METRICS):
+                metric_records[metric] = records
+
+        # Build summary
+        summary: dict[str, dict[str, dict]] = {}
+        metric_totals: dict[str, int] = {}
+        for metric, records in metric_records.items():
+            metric_totals[metric] = len(records)
+            for r in records:
+                dims = r.get("dimensions") or {}
+                env = str(dims.get("sf_environment") or "unknown")
+                svc = str(dims.get("sf_service") or "(none)")
+                entry = summary.setdefault(env, {}).setdefault(svc, {"mms": 0, "tms": 0, "metrics": {}})
+                if metric in MMS_METRICS:
+                    entry["mms"] += 1
+                else:
+                    entry["tms"] += 1
+                entry["metrics"][metric] = entry["metrics"].get(metric, 0) + 1
 
         rows = []
         for env, svcs in sorted(summary.items()):
             for svc, counts in sorted(svcs.items(), key=lambda x: -(x[1]["mms"] + x[1]["tms"])):
-                rows.append({"service": svc, "environment": env, "mms": counts["mms"], "tms": counts["tms"]})
+                rows.append({
+                    "service": svc, "environment": env,
+                    "mms": counts["mms"], "tms": counts["tms"],
+                    "metrics": counts["metrics"],
+                })
 
         rows.sort(key=lambda r: -(r["mms"] + r["tms"]))
         total_mms = sum(r["mms"] for r in rows)

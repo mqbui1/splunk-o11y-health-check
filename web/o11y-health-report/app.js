@@ -57,6 +57,18 @@ function stripPreambleFieldValueTable(md) {
 }
 
 /** Metadata assessment timestamp → long date in UTC (e.g. May 4, 2026). */
+/** Convert ISO8601 duration (P1D, P7D, P30D) to a human-readable UTC date range ending now.
+ *  e.g. P7D → "May 8 – May 15, 2026 (UTC)"
+ */
+function _lookbackToDateRange(lookback) {
+  const days = { P1D: 1, P7D: 7, P30D: 30 }[String(lookback).toUpperCase()] || 0;
+  if (!days) return lookback;
+  const now = new Date();
+  const start = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  const fmt = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+  return `${fmt(start)} – ${fmt(now)} (UTC)`;
+}
+
 function formatAssessmentDateUtc(raw) {
   if (!raw || typeof raw !== "string") return "";
   const s = raw.trim();
@@ -1313,14 +1325,20 @@ function peInjectCustomMetricsPanel(sectionBodyEl) {
   let panel = document.getElementById(PANEL_ID);
   if (panel) return panel;
 
-  // Find and remove the static cardinality table within this section
-  const allWraps = sectionBodyEl
-    ? [...sectionBodyEl.querySelectorAll(".table-pagination-wrap")]
-    : [...document.querySelectorAll(".table-pagination-wrap")];
+  // Find and remove the static cardinality table within this section.
+  // Check both paginated wraps and bare tables (small tables skip pagination wrapping).
+  const searchRoot = sectionBodyEl || document;
+  const allWraps = [...searchRoot.querySelectorAll(".table-pagination-wrap")];
   const imWrap = allWraps.find((w) => {
     const t = w.querySelector("table");
     return t && isMetricCardinalityVolumeTable(t);
-  });
+  }) || (() => {
+    // Fallback: bare table not yet wrapped by pagination
+    const bare = [...searchRoot.querySelectorAll("table")].find(
+      (t) => !t.closest(".table-pagination-wrap") && isMetricCardinalityVolumeTable(t)
+    );
+    return bare ? bare.closest("div, section, article") || bare.parentElement : null;
+  })();
 
   panel = document.createElement("div");
   panel.id = PANEL_ID;
@@ -1328,22 +1346,20 @@ function peInjectCustomMetricsPanel(sectionBodyEl) {
 
   if (imWrap) {
     const imParent = imWrap.parentElement || sectionBodyEl;
-    imWrap.before(panel);
+    // Strip static headings BEFORE inserting panel — _removeImCardinalitySectionContent
+    // removes all siblings after ### Results, which would delete the panel if it's already there.
     imWrap.remove();
-    // Remove the surrounding static section headings and text — the live panel replaces all of it
     _removeImCardinalitySectionContent(imParent);
+    imParent.prepend(panel);
   } else if (sectionBodyEl) {
-    _removeImCardinalitySectionContent(sectionBodyEl);
+    // No static cardinality table — just prepend the panel, do not strip any existing content
     sectionBodyEl.prepend(panel);
   } else {
     const imAnchorFb = [...document.querySelectorAll("article[id]")].find((el) =>
       (el.querySelector("h2")?.textContent || "").toLowerCase().includes("infrastructure monitoring")
     );
     const sectionBody = imAnchorFb?.querySelector(".section-card__body") || imAnchorFb;
-    if (sectionBody) {
-      _removeImCardinalitySectionContent(sectionBody);
-      sectionBody.prepend(panel);
-    }
+    if (sectionBody) sectionBody.prepend(panel);
   }
 
   const hasJob = !!new URLSearchParams(window.location.search).get("hubJob");
@@ -1359,17 +1375,10 @@ function peInjectCustomMetricsPanel(sectionBodyEl) {
          <option value="P30D">30 days</option>
        </select>`;
 
-  const assessmentDate = (STATE.meta && STATE.meta["Assessment date (UTC)"])
-    ? formatAssessmentDateUtc(STATE.meta["Assessment date (UTC)"])
-    : "";
-  const dateChip = assessmentDate
-    ? `<span class="pe-cm-inline-date-chip">Report date: ${escapeHtml(assessmentDate)}</span>`
-    : "";
-
   panel.innerHTML = `
     <div class="pe-cm-inline-header">
       <div>
-        <h3 class="pe-cm-inline-title">MTS full breakdown ${dateChip}</h3>
+        <h3 class="pe-cm-inline-title">MTS full breakdown</h3>
         <p class="pe-cm-inline-subtitle">All metrics fetched live from the Usage Analytics API, ranked by MTS volume. Filter by billing class using the dropdown.</p>
       </div>
       <div class="pe-drill-cm-controls" style="margin-top:0">
@@ -1455,17 +1464,10 @@ function peInjectMetricsetPanel(sectionBodyEl) {
          <option value="24">24 hours</option>
        </select>`;
 
-  const msAssessmentDate = (STATE.meta && STATE.meta["Assessment date (UTC)"])
-    ? formatAssessmentDateUtc(STATE.meta["Assessment date (UTC)"])
-    : "";
-  const msDateChip = msAssessmentDate
-    ? `<span class="pe-cm-inline-date-chip">Report date: ${escapeHtml(msAssessmentDate)}</span>`
-    : "";
-
   panel.innerHTML = `
     <div class="pe-cm-inline-header">
       <div>
-        <h3 class="pe-cm-inline-title">MetricSet breakdown by service &amp; environment ${msDateChip}</h3>
+        <h3 class="pe-cm-inline-title">MetricSet breakdown by service &amp; environment</h3>
         <p class="pe-cm-inline-subtitle">Monitoring MetricSet (MMS) and Troubleshooting MetricSet (TMS) counts per service and deployment environment, fetched live via SignalFlow.</p>
       </div>
       <div class="pe-drill-cm-controls" style="margin-top:0">
@@ -1603,6 +1605,11 @@ function peRenderMetricsetData(container, data) {
        </div>`
     : "";
 
+  const now = new Date();
+  const windowStart = new Date(now.getTime() - hours * 60 * 60 * 1000);
+  const fmtUtc = (d) => d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "UTC" }) + " UTC";
+  const windowLabel = `${fmtUtc(windowStart)} – ${fmtUtc(now)}`;
+
   container.innerHTML = `
     <div class="pe-drill-cm-summary">
       <div class="pe-drill-cm-stat">
@@ -1617,9 +1624,9 @@ function peRenderMetricsetData(container, data) {
         <span class="pe-drill-cm-stat-num">${escapeHtml(String(rows.length))}</span>
         <span class="pe-drill-cm-stat-label">Services</span>
       </div>
-      <div class="pe-drill-cm-stat">
-        <span class="pe-drill-cm-stat-num">${escapeHtml(String(hours))}</span>
-        <span class="pe-drill-cm-stat-label">Hour window</span>
+      <div class="pe-drill-cm-stat pe-drill-cm-stat--wide">
+        <span class="pe-drill-cm-stat-num pe-drill-cm-stat-num--sm">${escapeHtml(windowLabel)}</span>
+        <span class="pe-drill-cm-stat-label">Data window (UTC)</span>
       </div>
     </div>
     ${envTabsHtml}
@@ -1627,6 +1634,7 @@ function peRenderMetricsetData(container, data) {
       <table class="pe-drill-table pe-ms-table" id="pe-ms-data-table">
         <thead>
           <tr>
+            <th style="width:1.5rem"></th>
             <th class="sortable" data-sort="service">Service<span class="pe-sort-arrow">⇅</span></th>
             <th class="sortable" data-sort="environment">Environment<span class="pe-sort-arrow">⇅</span></th>
             <th class="sortable" data-sort="mms">MMS<span class="pe-sort-arrow">▼</span></th>
@@ -1642,13 +1650,51 @@ function peRenderMetricsetData(container, data) {
 
   function renderRows() {
     const filtered = _activeEnv ? rows.filter((r) => (r.environment || "unknown") === _activeEnv) : rows;
-    tbody.innerHTML = filtered.map((r) => `
-      <tr>
+    tbody.innerHTML = "";
+    if (!filtered.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="pe-ms-empty">No data for this filter.</td></tr>`;
+      return;
+    }
+    filtered.forEach((r) => {
+      const hasMetrics = r.metrics && Object.keys(r.metrics).length > 0;
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td class="pe-ms-expand-cell">${hasMetrics ? `<button class="pe-ms-expand-btn" title="Show metric breakdown">▶</button>` : ""}</td>
         <td>${escapeHtml(r.service || "—")}</td>
         <td><span class="pe-ms-env-badge">${escapeHtml(r.environment || "unknown")}</span></td>
         <td class="pe-ms-num">${escapeHtml(formatPeScalarDisplay(r.mms))}</td>
-        <td class="pe-ms-num">${escapeHtml(formatPeScalarDisplay(r.tms))}</td>
-      </tr>`).join("") || `<tr><td colspan="4" class="pe-ms-empty">No data for this filter.</td></tr>`;
+        <td class="pe-ms-num">${escapeHtml(formatPeScalarDisplay(r.tms))}</td>`;
+      tbody.appendChild(tr);
+
+      if (hasMetrics) {
+        const detailTr = document.createElement("tr");
+        detailTr.className = "pe-ms-detail-row";
+        detailTr.style.display = "none";
+        const metricRows = Object.entries(r.metrics)
+          .sort((a, b) => b[1] - a[1])
+          .map(([name, count]) => `
+            <tr>
+              <td class="pe-ms-metric-name">${escapeHtml(name)}</td>
+              <td class="pe-ms-metric-type">${name.startsWith("spans.") ? "TMS" : "MMS"}</td>
+              <td class="pe-ms-metric-count">${count} MTS</td>
+            </tr>`).join("");
+        detailTr.innerHTML = `<td colspan="5" style="padding:0">
+          <div class="pe-ms-detail-wrap">
+            <table class="pe-ms-detail-table">
+              <thead><tr><th>Metric</th><th>Type</th><th>MTS count</th></tr></thead>
+              <tbody>${metricRows}</tbody>
+            </table>
+          </div></td>`;
+        tbody.appendChild(detailTr);
+
+        const btn = tr.querySelector(".pe-ms-expand-btn");
+        btn.addEventListener("click", () => {
+          const open = detailTr.style.display !== "none";
+          detailTr.style.display = open ? "none" : "";
+          btn.textContent = open ? "▶" : "▼";
+        });
+      }
+    });
   }
 
   renderRows();
@@ -1808,7 +1854,7 @@ function peShowCredentialForm(container, lookback, realmHint) {
 
   container.innerHTML = `
     <div class="pe-drill-cred-form">
-      <p class="pe-drill-cred-note">Enter your org access token to load the full custom metrics breakdown from the Usage Analytics API.</p>
+      <p class="pe-drill-cred-note">Enter your org access token to load the full custom metrics breakdown from the Usage Analytics API. The same token is used to load per-metric service and environment breakdowns — it must have <strong>API</strong> scope.</p>
       <div class="pe-drill-cred-row">
         <div class="pe-drill-cred-field">
           <label class="pe-drill-cred-label" for="pe-drill-realm-input">Realm</label>
@@ -1962,8 +2008,8 @@ function peRenderCustomMetricsData(container, data, activeBillingClass) {
     ${hasDims ? `<th class="sortable" data-sort="dimensionCount"><span class="pe-th-tip" data-tip="Number of distinct dimensions on this metric — high cardinality drives high MTS cost">Dimensions</span><span class="pe-sort-arrow">⇅</span></th>` : ""}
     <th class="sortable" data-sort="usage"><span class="pe-th-tip" data-tip="Where this metric is referenced: det = detectors, active = active charts, inactive = saved/inactive charts, API = programmatic API queries. — means unused.">Usage</span><span class="pe-sort-arrow">⇅</span></th>
     ${hasCreator ? `<th class="sortable" data-sort="creator"><span class="pe-th-tip" data-tip="The user who created or owns this metric">Creator</span><span class="pe-sort-arrow">⇅</span></th>` : ""}
-    <th><span class="pe-th-tip" data-tip="Service names found on this metric's time series, with MTS count per service">Services</span></th>
-    <th><span class="pe-th-tip" data-tip="Deployment environments found on this metric's time series, with MTS count per environment">Environments</span></th>
+    <th><span class="pe-th-tip" data-tip="Service names on this metric's MTS (from service/sf_service dimensions). — means no service tag — common for infra metrics.">Services</span></th>
+    <th><span class="pe-th-tip" data-tip="Deployment environments on this metric's MTS. — means no environment tag.">Environments</span></th>
   </tr>`;
 
   container.innerHTML = `
@@ -1971,7 +2017,7 @@ function peRenderCustomMetricsData(container, data, activeBillingClass) {
       <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num" id="pe-stat-metric-count">${escapeHtml(formatPeScalarDisplay(metrics.length))}</span><span class="pe-drill-cm-stat-label" id="pe-stat-metric-label">All metrics</span></div>
       <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num" id="pe-stat-filtered-mts">${escapeHtml(formatPeScalarDisplay(totalOrgMts))}</span><span class="pe-drill-cm-stat-label" id="pe-stat-filtered-mts-label">Org total MTS (avg/hr)</span></div>
       <div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num" id="pe-stat-filtered-pct">100%</span><span class="pe-drill-cm-stat-label" id="pe-stat-filtered-pct-label">% of org MTS</span></div>
-      ${lookback ? `<div class="pe-drill-cm-stat"><span class="pe-drill-cm-stat-num">${escapeHtml(lookback)}</span><span class="pe-drill-cm-stat-label">Lookback window</span></div>` : ""}
+      ${lookback ? `<div class="pe-drill-cm-stat pe-drill-cm-stat--wide"><span class="pe-drill-cm-stat-num pe-drill-cm-stat-num--sm">${escapeHtml(_lookbackToDateRange(lookback))}</span><span class="pe-drill-cm-stat-label">Data window (UTC)</span></div>` : ""}
     </div>
     <h5 class="pe-drill-cm-section-head">Custom metrics utilization</h5>
     <div class="pe-drill-util-bar">${barSegs || '<div style="width:100%;background:var(--splunk-border);height:100%"></div>'}</div>
@@ -2021,73 +2067,50 @@ function peRenderCustomMetricsData(container, data, activeBillingClass) {
     return _svcCache[metricName];
   }
 
-  let _tokenPromptShown = false;
-  const _pendingCells = [];
-
-  function showTokenBanner(realm) {
-    if (_tokenPromptShown) return;
-    _tokenPromptShown = true;
-    _peOrgRealm = realm || _peOrgRealm;
-    const banner = document.createElement("div");
-    banner.className = "pe-cm-token-banner";
-    banner.innerHTML = `
-      <span class="pe-cm-token-banner-msg">Enter your org access token to load service data:</span>
-      <input class="pe-drill-cred-input" type="text" placeholder="Realm" value="${escapeHtml(_peOrgRealm)}" style="width:65px" />
-      <input class="pe-drill-cred-input" type="password" placeholder="Token" style="width:190px" autocomplete="off" />
-      <button class="btn pe-drill-load-btn">Load</button>`;
-    const toolbar = container.querySelector(".pe-cm-table-toolbar");
-    if (toolbar) toolbar.after(banner);
-    const inputs = banner.querySelectorAll("input");
-    const btn = banner.querySelector("button");
-    btn.addEventListener("click", async () => {
-      const t = inputs[1].value.trim();
-      if (!t) return;
-      _peOrgToken = t;
-      _peOrgRealm = inputs[0].value.trim() || "us0";
-      banner.remove();
-      await Promise.allSettled(_pendingCells.map(({ td, envTd, metricName }) => loadServiceCell(td, envTd, metricName)));
-      _pendingCells.length = 0;
-    });
-  }
-
   async function loadServiceCell(td, envTd, metricName) {
     td.innerHTML = `<span class="pe-cm-svc-loading">…</span>`;
     envTd.innerHTML = `<span class="pe-cm-svc-loading">…</span>`;
     try {
       const { services, environments } = await fetchMetricServices(metricName);
-      const totalMts = services.reduce((sum, s) => sum + (typeof s === "object" ? (s.mts || 0) : 0), 0);
-      const totalLine = totalMts > 0 ? `<div class="pe-cm-svc-total">Total: ${totalMts} MTS</div>` : "";
-      td.innerHTML = services.length
-        ? services.map((s) => {
-            const name = typeof s === "object" ? s.name : s;
-            const mts = typeof s === "object" ? s.mts : null;
-            const tip = mts != null ? `${mts} MTS attributed to ${name}` : name;
-            return `<span class="pe-cm-svc-tag" data-tip="${escapeHtml(tip)}">${escapeHtml(name)}${mts != null ? ` <span class="pe-cm-svc-mts">(${mts})</span>` : ""}</span>`;
-          }).join("") + totalLine
-        : `<span class="pe-cm-svc-empty">—</span>`;
-      envTd.innerHTML = environments.length
-        ? environments.map((e) => {
-            const name = typeof e === "object" ? e.name : e;
-            const mts = typeof e === "object" ? e.mts : null;
-            const tip = mts != null ? `${mts} MTS in environment ${name}` : name;
-            return `<span class="pe-cm-svc-tag pe-cm-env-tag" data-tip="${escapeHtml(tip)}">${escapeHtml(name)}${mts != null ? ` <span class="pe-cm-svc-mts">(${mts})</span>` : ""}</span>`;
-          }).join("")
-        : `<span class="pe-cm-svc-empty">—</span>`;
-    } catch (err) {
-      if (err.message === "token_required") {
-        if (_peOrgToken) {
-          td.innerHTML = `<span class="pe-cm-svc-empty" title="Token lacks MTS API scope">—</span>`;
-          envTd.innerHTML = `<span class="pe-cm-svc-empty">—</span>`;
-        } else {
-          td.innerHTML = `<span class="pe-cm-svc-empty">—</span>`;
-          envTd.innerHTML = `<span class="pe-cm-svc-empty">—</span>`;
-          _pendingCells.push({ td, envTd, metricName });
-          showTokenBanner(err.realm);
+      function renderTagCell(cell, items, extraClass) {
+        if (!items.length) { cell.innerHTML = `<span class="pe-cm-svc-empty">—</span>`; return; }
+        const MAX = 3;
+        const cls = `pe-cm-svc-tag${extraClass ? " " + extraClass : ""}`;
+        const mkTag = (name) => `<span class="${cls}">${escapeHtml(name)}</span>`;
+        const names = items.map((i) => typeof i === "object" ? i.name : i);
+        cell.innerHTML = names.slice(0, MAX).map(mkTag).join("");
+        if (names.length > MAX) {
+          const more = document.createElement("span");
+          more.className = "pe-cm-svc-more";
+          more.textContent = `+${names.length - MAX} more`;
+          let expanded = false;
+          let added = [];
+          more.addEventListener("click", () => {
+            if (!expanded) {
+              names.slice(MAX).forEach((name) => {
+                const tag = document.createElement("span");
+                tag.className = cls;
+                tag.textContent = name;
+                cell.insertBefore(tag, more);
+                added.push(tag);
+              });
+              more.textContent = "show less";
+              expanded = true;
+            } else {
+              added.forEach((t) => t.remove());
+              added = [];
+              more.textContent = `+${names.length - MAX} more`;
+              expanded = false;
+            }
+          });
+          cell.appendChild(more);
         }
-      } else {
-        td.innerHTML = `<span class="pe-cm-svc-empty" title="${escapeHtml(String(err))}">err</span>`;
-        envTd.innerHTML = `<span class="pe-cm-svc-empty">—</span>`;
       }
+      renderTagCell(td, services, "");
+      renderTagCell(envTd, environments, "pe-cm-env-tag");
+    } catch (err) {
+      td.innerHTML = `<span class="pe-cm-svc-empty">—</span>`;
+      envTd.innerHTML = `<span class="pe-cm-svc-empty">—</span>`;
     }
   }
 
@@ -2165,7 +2188,7 @@ function peRenderCustomMetricsData(container, data, activeBillingClass) {
     });
   }
 
-  const CONCURRENCY = 8;
+  const CONCURRENCY = 3;
   async function drainSvcCells(queue) {
     const active = [];
     for (const item of queue) {
@@ -2237,6 +2260,7 @@ function peRenderCustomMetricsData(container, data, activeBillingClass) {
 
   bcFilter.addEventListener("change", () => { _page = 0; applyFilter(bcFilter.value); });
   applyFilter(selectedBc);
+
 
   // Tooltip for column headers — fixed-position div escapes overflow clipping
   let _tipEl = document.getElementById("pe-col-tooltip");
@@ -3284,7 +3308,7 @@ function paginateMetricCardinalityTables(rootEl) {
     if (!tbody) return;
 
     const dataRows = [...tbody.querySelectorAll("tr")].filter((tr) => tr.querySelector("td"));
-    if (dataRows.length <= DEFAULT_PAGE_SIZE) return;
+    // Always wrap — even small tables need the wrap so peInjectCustomMetricsPanel can find and replace them
 
     const wrap = document.createElement("div");
     wrap.className = "table-pagination-wrap";

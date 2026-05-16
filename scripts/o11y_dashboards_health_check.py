@@ -369,6 +369,7 @@ class DashboardHealthConfig:
     max_dashboards: int
     max_inactive_metric_checks: int
     sleep_s: float
+    max_charts_per_dashboard: int = 50
 
 
 def run_dashboard_health(token: str, cfg: DashboardHealthConfig) -> dict[str, Any]:
@@ -417,7 +418,35 @@ def run_dashboard_health(token: str, cfg: DashboardHealthConfig) -> dict[str, An
                 time.sleep(cfg.sleep_s)
             continue
 
-        charts = iter_chart_units(detail)
+        # Collect chart IDs from the dashboard — the dashboard payload only has
+        # chart IDs, not chart programs. We must call /v2/chart/{id} for each.
+        chart_ids_raw = detail.get("chartIds") or []
+        if isinstance(chart_ids_raw, list) and chart_ids_raw:
+            chart_objs: list[dict[str, Any]] = []
+            for cid in chart_ids_raw[: cfg.max_charts_per_dashboard]:
+                cid_s = str(cid).strip()
+                if not cid_s:
+                    continue
+                cdetail, cerr = api_get(
+                    token, cfg.realm, f"/v2/chart/{urllib.parse.quote(cid_s, safe='')}", None
+                )
+                if cfg.sleep_s > 0:
+                    time.sleep(cfg.sleep_s)
+                if cerr or not isinstance(cdetail, dict):
+                    continue
+                chart_objs.append(cdetail)
+            charts = [
+                (
+                    str(c.get("id") or "—"),
+                    str(c.get("name") or c.get("id") or "—"),
+                    collect_strings(c),
+                )
+                for c in chart_objs
+            ]
+        else:
+            # Fallback: try to parse chart units from the dashboard payload itself
+            charts = iter_chart_units(detail)
+
         for chart_id, chart_name, blob in charts:
             # Detector references
             for det_id in extract_detector_ids_from_text(blob):
@@ -645,6 +674,12 @@ def main() -> int:
         default=80,
         help="Max distinct metrics to check via MTS search (default 80).",
     )
+    p.add_argument(
+        "--max-charts-per-dashboard",
+        type=int,
+        default=50,
+        help="Max charts to fetch per dashboard via /v2/chart/{id} (default 50).",
+    )
     p.add_argument("--sleep", type=float, default=0.05, help="Seconds between API bursts (default 0.05).")
     p.add_argument("--structured-json-out", metavar="PATH", help="Write normalized report JSON for o11y_health_check_run.py.")
     p.add_argument("--md-out", metavar="PATH", help="Write markdown section (## Dashboards health checks).")
@@ -674,6 +709,7 @@ def main() -> int:
         max_dashboards=max(1, min(args.max_dashboards, 5000)),
         max_inactive_metric_checks=max(0, min(args.max_inactive_metric_checks, 500)),
         sleep_s=max(0.0, float(args.sleep)),
+        max_charts_per_dashboard=max(1, min(args.max_charts_per_dashboard, 500)),
     )
     report = run_dashboard_health(token, cfg)
 
