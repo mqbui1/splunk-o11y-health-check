@@ -6,13 +6,11 @@ Uses REST on ``https://api.{realm}.signalfx.com`` (same family as MCP: ``/v2/det
 ``/v2/detector/{id}/events``, ``/v2/metrictimeseries``, ``/v2/incident``, ``/v2/alertmuting``) plus optional
 ``GET https://app.{realm}.signalfx.com/v2/integration`` to flag inactive notification integrations.
 
-**Inactive MTS:** metric names from ``programText`` (``data('…')``) are checked against
-``GET /v2/metrictimeseries``; ``lastUpdated`` is read from search or ``GET /v2/metrictimeseries/{id}``
-when the list response omits it. Stale = older than ``--inactive-mts-hours`` (default 36). Heavily capped.
-
 **Redundant detectors:** detectors are grouped when they share at least one **MTS id** among the series sampled from
-each ``programText`` (same ``data('…')`` / ``/v2/metrictimeseries`` path and caps as inactive-MTS). If inactive-MTS
-is disabled, MTS ids are still sampled for this overlap check only.
+each ``programText`` (``data('…')`` / ``/v2/metrictimeseries``, heavily capped).
+
+Per-detector work (detail + MTS sampling + events lookup) runs concurrently across a thread pool
+(``--concurrency``, default 10) to keep runtime manageable for orgs with hundreds of detectors.
 
 Outputs structured JSON aligned with ``Splunk-Observability-Health-Check.md`` Detectors section.
 Detector names in tables render as HTML links (``target="_blank"``, ``rel="noopener noreferrer"``) to
@@ -36,6 +34,7 @@ import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,17 +69,6 @@ DETECTOR_HEALTH_CHECKLIST: dict[str, dict[str, str]] = {
         "description": "List of active detectors that have not triggered in the last 30 days.",
         "recommendation": (
             "Review detector rules, thresholds, and whether the signal is still relevant."
-        ),
-    },
-    "inactiveMts": {
-        "title": "Identify Detectors on Inactive Metric Time Series (MTS)",
-        "description": (
-            "An inactive MTS is one that has not received any datapoints for at least 36 hours. "
-            "A detector that is monitoring an inactive MTS is not doing anything. This could be because the MTS may "
-            "have changed its name, and the detector was not updated."
-        ),
-        "recommendation": (
-            "Review the list of detectors and determine if it should be deleted or if the signal needs to be updated."
         ),
     },
     "redundant": {
@@ -424,48 +412,6 @@ def search_metric_timeseries(
     return [x for x in res if isinstance(x, dict)], None
 
 
-def _inactive_signal_mts_label(metric: str, row: dict[str, Any], *, max_len: int = 450) -> str:
-    """
-    Inactive Signal column: metric (MTS) name and dimension filters only, comma-separated.
-    No MTS ids, timestamps, or ages.
-    """
-    m = row.get("metric")
-    name = str(m).strip() if isinstance(m, str) and m.strip() else str(metric).strip()
-    dims = row.get("dimensions")
-    if not isinstance(dims, dict) or not dims:
-        out = name
-    else:
-        filters = ", ".join(f"{k}={str(v)}" for k, v in sorted(dims.items()))
-        out = f"{name}, {filters}" if filters else name
-    if len(out) > max_len:
-        return out[: max_len - 1] + "…"
-    return out
-
-
-def mts_last_updated_from_row_or_detail(
-    token: str,
-    realm: str,
-    row: dict[str, Any],
-) -> tuple[int | None, str | None]:
-    """Return lastUpdated ms from MTS row, or GET /v2/metrictimeseries/{id} if list had 0/missing."""
-    lu = row.get("lastUpdated")
-    if isinstance(lu, (int, float)) and lu > 0:
-        return int(lu), None
-    mid = row.get("id")
-    if not isinstance(mid, str) or not mid:
-        return None, None
-    path = f"/v2/metrictimeseries/{urllib.parse.quote(mid, safe='')}"
-    detail, err = api_get(token, realm, path, None)
-    if err:
-        return None, err
-    if not isinstance(detail, dict):
-        return None, None
-    lu2 = detail.get("lastUpdated")
-    if isinstance(lu2, (int, float)) and lu2 > 0:
-        return int(lu2), None
-    return None, None
-
-
 def collect_mts_ids_for_program(
     token: str,
     realm: str,
@@ -477,9 +423,8 @@ def collect_mts_ids_for_program(
     sleep_s: float,
 ) -> tuple[set[str], str | None]:
     """
-    Sample MTS ids from ``programText`` (``data('…')``) via ``/v2/metrictimeseries`` — same sampling shape as
-    inactive-MTS evaluation, without ``lastUpdated`` calls. Used when inactive-MTS check is skipped but redundant
-    overlap still needs MTS ids.
+    Sample MTS ids from ``programText`` (``data('…')``) via ``/v2/metrictimeseries``. Used to find
+    redundant-detector overlap (detectors sharing at least one sampled MTS id).
     """
     metrics = extract_metrics_from_program(program, max_metrics=max_metrics)
     if not metrics:
@@ -506,94 +451,6 @@ def collect_mts_ids_for_program(
             if sleep_s > 0:
                 time.sleep(sleep_s)
     return ids, api_err
-
-
-def evaluate_inactive_mts_for_detector(
-    token: str,
-    realm: str,
-    *,
-    program: str,
-    now_ms: int,
-    stale_ms: int,
-    max_metrics: int,
-    per_metric_search_limit: int,
-    max_mts_evaluations: int,
-    sleep_s: float,
-) -> tuple[str | None, str | None, str | None, set[str]]:
-    """
-    Returns (inactive_signal, color, api_error_note, mts_ids_sampled).
-    ``mts_ids_sampled`` collects MTS ``id`` values from the same search path (for redundant-detector overlap).
-    If no ``data()`` metrics parsed, returns (None, None, None, set()).
-    Only adds an inactive finding when there is a potential inactive/stale signal.
-    Color may be Yellow (mixed/API noise) or Red (all sampled series stale); the **inactive-MTS table**
-    only includes **Red** rows — see ``run_detector_health``.
-    """
-    metrics = extract_metrics_from_program(program, max_metrics=max_metrics)
-    if not metrics:
-        return None, None, None, set()
-
-    mts_sampled: set[str] = set()
-    parts: list[str] = []
-    api_err: str | None = None
-    stale_flags: list[bool] = []
-    fresh_seen = False
-    remaining = max(1, max_mts_evaluations)
-
-    for metric in metrics:
-        if remaining <= 0:
-            break
-        q = _mts_search_query(metric)
-        lim = min(per_metric_search_limit, remaining)
-        rows, serr = search_metric_timeseries(token, realm, query=q, limit=lim)
-        if serr:
-            api_err = api_err or serr
-            parts.append(f"{metric}, search error")
-            stale_flags.append(True)
-            continue
-        if not rows:
-            parts.append(f"{metric}, no MTS")
-            stale_flags.append(True)
-            continue
-        for row in rows:
-            if remaining <= 0:
-                break
-            mid = row.get("id")
-            if isinstance(mid, str) and mid:
-                mts_sampled.add(mid)
-            lu, derr = mts_last_updated_from_row_or_detail(token, realm, row)
-            if derr and api_err is None:
-                api_err = derr
-            remaining -= 1
-            if sleep_s > 0:
-                time.sleep(sleep_s)
-            if lu is None:
-                parts.append(_inactive_signal_mts_label(metric, row))
-                stale_flags.append(True)
-                continue
-            is_stale = (now_ms - lu) >= stale_ms
-            stale_flags.append(is_stale)
-            if not is_stale:
-                fresh_seen = True
-            if is_stale:
-                parts.append(_inactive_signal_mts_label(metric, row))
-
-    if not parts:
-        return None, None, api_err, mts_sampled
-
-    any_stale = any(stale_flags)
-    if not any_stale:
-        return None, None, api_err, mts_sampled
-
-    if api_err:
-        color = "Yellow"
-    elif fresh_seen:
-        color = "Yellow"
-    else:
-        color = "Red"
-
-    joined = "; ".join(parts)
-    sig = joined[:450] + ("…" if len(joined) > 450 else "")
-    return sig, color, api_err, mts_sampled
 
 
 def redundant_detector_groups_from_shared_mts(
@@ -847,11 +704,112 @@ class DetectorHealthConfig:
     noisy_7d_red: int
     noisy_7d_yellow: int
     sleep_s: float
-    inactive_mts_enabled: bool = True
-    inactive_mts_stale_hours: float = 36.0
-    inactive_mts_max_metrics: int = 3
-    inactive_mts_search_limit: int = 3
-    inactive_mts_max_evaluations: int = 6
+    concurrency: int = 10
+    mts_max_metrics: int = 3
+    mts_search_limit: int = 3
+    mts_max_samples: int = 6
+
+
+def _process_detector(
+    token: str,
+    realm: str,
+    did: str,
+    name: str,
+    det_rows: list[dict[str, Any]],
+    integ_active: set[str],
+    integ_err: str | None,
+    muting_rules: list[dict[str, Any]],
+    *,
+    now_ms: int,
+    win7: int,
+    win30: int,
+    mts_max_metrics: int,
+    mts_search_limit: int,
+    mts_max_samples: int,
+    sleep_s: float,
+    noisy_7d_red: int,
+    noisy_7d_yellow: int,
+) -> dict[str, Any]:
+    """Fetch and evaluate everything for a single detector. Safe to run concurrently — only reads shared inputs."""
+    detail, gerr = api_get(token, realm, f"/v2/detector/{urllib.parse.quote(did, safe='')}", None)
+    if gerr or not isinstance(detail, dict):
+        detail = next((r for r in det_rows if str(r.get("id")) == did), {})
+
+    program = extract_program_text(detail)
+    sampled_mts: set[str] = set()
+    if program:
+        sampled_mts, _cid_err = collect_mts_ids_for_program(
+            token,
+            realm,
+            program=program,
+            max_metrics=mts_max_metrics,
+            per_metric_search_limit=mts_search_limit,
+            max_mts_total=mts_max_samples,
+            sleep_s=sleep_s,
+        )
+
+    events, everr = fetch_detector_events(token, realm, did, win30, now_ms)
+    if everr:
+        c7, c30 = 0, 0
+    else:
+        c7, c30 = count_events_in_windows(events, now_ms=now_ms, win7_ms=win7, win30_ms=win30)
+
+    list_row = next((r for r in det_rows if str(r.get("id")) == did), None)
+    lr = list_row if isinstance(list_row, dict) else None
+    muted = bool(detail.get("muted")) if isinstance(detail.get("muted"), bool) else False
+    disabled_ui = detector_is_disabled_or_inactive(detail, lr)
+    det_url = detector_edit_url(realm, did)
+
+    noisy_row = None
+    if c7 >= noisy_7d_red:
+        noisy_row = {"color": "Red", "detectorId": did, "detectorName": name, "detectorUrl": det_url, "triggers7d": c7}
+    elif c7 >= noisy_7d_yellow:
+        noisy_row = {"color": "Yellow", "detectorId": did, "detectorName": name, "detectorUrl": det_url, "triggers7d": c7}
+
+    non_firing_row = None
+    if c30 == 0 and not muted and not disabled_ui:
+        non_firing_row = {
+            "color": "Yellow", "detectorId": did, "detectorName": name, "detectorUrl": det_url, "triggers30d": c30,
+        }
+
+    emails, n_iids = parse_notifications(detail)
+    dest_str = "; ".join(emails + [f"integration:{x}" for x in n_iids[:3]]) or "—"
+    color_d = classify_inactive_alert_destination_row(
+        emails, n_iids, muted=muted, disabled=disabled_ui, integ_active=integ_active, integ_err=integ_err,
+    )
+    dest_row = None
+    if color_d in ("Red", "Yellow"):
+        dest_row = {
+            "color": color_d,
+            "detectorId": did,
+            "detectorName": name,
+            "detectorUrl": det_url,
+            "detectorState": detector_state_label(muted, disabled_ui),
+            "alertSentTo": dest_str[:500],
+        }
+
+    muted_row = None
+    if muted:
+        muted_ts = detail.get("muteEndTime") or detail.get("mutedUntil") or detail.get("muteStartDate")
+        mute_label = str(muted_ts) if muted_ts else "—"
+        rules_h = muting_rules_for_detector(muting_rules or [], did, name)
+        rule_s = ", ".join(rules_h) if rules_h else "—"
+        muted_row = {
+            "color": "Yellow", "detectorId": did, "detectorName": name, "detectorUrl": det_url,
+            "mutedDate": mute_label, "mutingRule": rule_s,
+        }
+
+    if sleep_s > 0:
+        time.sleep(sleep_s)
+
+    return {
+        "noisy": noisy_row,
+        "nonFiring": non_firing_row,
+        "dest": dest_row,
+        "muted": muted_row,
+        "mts_ids": sampled_mts,
+        "events_error": everr,
+    }
 
 
 def run_detector_health(
@@ -861,7 +819,6 @@ def run_detector_health(
     now_ms = int(time.time() * 1000)
     win7 = now_ms - 7 * _MS_DAY
     win30 = now_ms - 30 * _MS_DAY
-    stale_mts_ms = int(max(1.0, cfg.inactive_mts_stale_hours) * 3600 * 1000)
 
     det_rows, err = paginate_results(token, cfg.realm, "/v2/detector", page_size=100)
     if err:
@@ -886,158 +843,69 @@ def run_detector_health(
 
     muting_rules, muting_err = paginate_alertmuting(token, cfg.realm)
 
-    # Optional: org incidents for fallback counts (expensive to paginate all)
     incidents_note: str | None = None
-    inactive_mts_api_samples: list[str] = []
-
     noisy_rows: list[dict[str, Any]] = []
     non_firing_rows: list[dict[str, Any]] = []
-    inactive_mts_rows: list[dict[str, Any]] = []
     dest_rows: list[dict[str, Any]] = []
     muted_rows: list[dict[str, Any]] = []
 
-    # MTS ids sampled per detector (same ``data()`` / metrictimeseries path as inactive-MTS); used for redundant overlap.
+    # MTS ids sampled per detector (from programText / metrictimeseries); used for redundant overlap.
     detector_to_mts: dict[str, set[str]] = {}
 
+    # Per-detector work (detail + MTS sampling + events lookup) is independent across detectors —
+    # run it concurrently so orgs with hundreds of detectors don't blow past the caller's timeout.
+    with ThreadPoolExecutor(max_workers=max(1, cfg.concurrency)) as pool:
+        futures = {
+            pool.submit(
+                _process_detector,
+                token,
+                cfg.realm,
+                did,
+                id_to_name.get(did, did),
+                det_rows,
+                integ_active,
+                integ_err,
+                muting_rules,
+                now_ms=now_ms,
+                win7=win7,
+                win30=win30,
+                mts_max_metrics=cfg.mts_max_metrics,
+                mts_search_limit=cfg.mts_search_limit,
+                mts_max_samples=cfg.mts_max_samples,
+                sleep_s=cfg.sleep_s,
+                noisy_7d_red=cfg.noisy_7d_red,
+                noisy_7d_yellow=cfg.noisy_7d_yellow,
+            ): did
+            for did in ids_in_order
+        }
+        results_by_id: dict[str, dict[str, Any]] = {}
+        for future in as_completed(futures):
+            did = futures[future]
+            try:
+                results_by_id[did] = future.result()
+            except Exception as exc:
+                results_by_id[did] = {
+                    "noisy": None, "nonFiring": None, "dest": None, "muted": None,
+                    "mts_ids": set(), "events_error": str(exc),
+                }
+
+    # Aggregate in stable (name-sorted) order even though execution above was concurrent.
     for did in ids_in_order:
-        name = id_to_name.get(did, did)
-        detail, gerr = api_get(token, cfg.realm, f"/v2/detector/{urllib.parse.quote(did, safe='')}", None)
-        if gerr or not isinstance(detail, dict):
-            detail = next((r for r in det_rows if str(r.get("id")) == did), {})
+        res = results_by_id.get(did) or {}
+        if res.get("events_error") and incidents_note is None:
+            incidents_note = res["events_error"]
+        if res.get("noisy"):
+            noisy_rows.append(res["noisy"])
+        if res.get("nonFiring"):
+            non_firing_rows.append(res["nonFiring"])
+        if res.get("dest"):
+            dest_rows.append(res["dest"])
+        if res.get("muted"):
+            muted_rows.append(res["muted"])
+        if res.get("mts_ids"):
+            detector_to_mts[did] = res["mts_ids"]
 
-        program = extract_program_text(detail)
-        sampled_mts: set[str] = set()
-        if program:
-            if cfg.inactive_mts_enabled:
-                sig, icolor, im_api_err, sampled_mts = evaluate_inactive_mts_for_detector(
-                    token,
-                    cfg.realm,
-                    program=program,
-                    now_ms=now_ms,
-                    stale_ms=stale_mts_ms,
-                    max_metrics=cfg.inactive_mts_max_metrics,
-                    per_metric_search_limit=cfg.inactive_mts_search_limit,
-                    max_mts_evaluations=cfg.inactive_mts_max_evaluations,
-                    sleep_s=cfg.sleep_s,
-                )
-                if im_api_err and len(inactive_mts_api_samples) < 5:
-                    inactive_mts_api_samples.append(im_api_err[:300])
-                # Report only Red (all sampled series stale, no API uncertainty); omit Yellow / uncertain.
-                if sig and icolor == "Red":
-                    inactive_mts_rows.append(
-                        {
-                            "color": "Red",
-                            "detectorId": did,
-                            "detectorName": name,
-                            "detectorUrl": detector_edit_url(cfg.realm, did),
-                            "inactiveSignal": sig,
-                        }
-                    )
-            else:
-                sampled_mts, _cid_err = collect_mts_ids_for_program(
-                    token,
-                    cfg.realm,
-                    program=program,
-                    max_metrics=cfg.inactive_mts_max_metrics,
-                    per_metric_search_limit=cfg.inactive_mts_search_limit,
-                    max_mts_total=cfg.inactive_mts_max_evaluations,
-                    sleep_s=cfg.sleep_s,
-                )
-            if sampled_mts:
-                detector_to_mts[did] = sampled_mts
-
-        events, everr = fetch_detector_events(token, cfg.realm, did, win30, now_ms)
-        if everr:
-            incidents_note = incidents_note or everr
-            c7, c30 = 0, 0
-        else:
-            c7, c30 = count_events_in_windows(events, now_ms=now_ms, win7_ms=win7, win30_ms=win30)
-
-        list_row = next((r for r in det_rows if str(r.get("id")) == did), None)
-        lr = list_row if isinstance(list_row, dict) else None
-        muted = bool(detail.get("muted")) if isinstance(detail.get("muted"), bool) else False
-        disabled_ui = detector_is_disabled_or_inactive(detail, lr)
-
-        # Noisy / non-firing
-        det_url = detector_edit_url(cfg.realm, did)
-        if c7 >= cfg.noisy_7d_red:
-            noisy_rows.append(
-                {
-                    "color": "Red",
-                    "detectorId": did,
-                    "detectorName": name,
-                    "detectorUrl": det_url,
-                    "triggers7d": c7,
-                }
-            )
-        elif c7 >= cfg.noisy_7d_yellow:
-            noisy_rows.append(
-                {
-                    "color": "Yellow",
-                    "detectorId": did,
-                    "detectorName": name,
-                    "detectorUrl": det_url,
-                    "triggers7d": c7,
-                }
-            )
-
-        if c30 == 0 and not muted and not disabled_ui:
-            non_firing_rows.append(
-                {
-                    "color": "Yellow",
-                    "detectorId": did,
-                    "detectorName": name,
-                    "detectorUrl": det_url,
-                    "triggers30d": c30,
-                }
-            )
-
-        emails, n_iids = parse_notifications(detail)
-        dest_str = "; ".join(emails + [f"integration:{x}" for x in n_iids[:3]])
-        if not dest_str:
-            dest_str = "—"
-
-        color_d = classify_inactive_alert_destination_row(
-            emails,
-            n_iids,
-            muted=muted,
-            disabled=disabled_ui,
-            integ_active=integ_active,
-            integ_err=integ_err,
-        )
-        if color_d in ("Red", "Yellow"):
-            dest_rows.append(
-                {
-                    "color": color_d,
-                    "detectorId": did,
-                    "detectorName": name,
-                    "detectorUrl": detector_edit_url(cfg.realm, did),
-                    "detectorState": detector_state_label(muted, disabled_ui),
-                    "alertSentTo": dest_str[:500],
-                }
-            )
-
-        # Muted
-        muted_ts = detail.get("muteEndTime") or detail.get("mutedUntil") or detail.get("muteStartDate")
-        mute_label = str(muted_ts) if muted_ts else "—"
-        rules_h = muting_rules_for_detector(muting_rules or [], did, name)
-        rule_s = ", ".join(rules_h) if rules_h else "—"
-        if muted:
-            muted_rows.append(
-                {
-                    "color": "Yellow",
-                    "detectorId": did,
-                    "detectorName": name,
-                    "detectorUrl": detector_edit_url(cfg.realm, did),
-                    "mutedDate": mute_label,
-                    "mutingRule": rule_s,
-                }
-            )
-
-        if cfg.sleep_s > 0:
-            time.sleep(cfg.sleep_s)
-
-    # Redundant: detectors that share at least one sampled MTS id (same search path as inactive-MTS; capped sample).
+    # Redundant: detectors that share at least one sampled MTS id (capped sample per detector).
     redundant_rows: list[dict[str, Any]] = []
     for group in redundant_detector_groups_from_shared_mts(detector_to_mts):
         sorted_g = sorted(group, key=lambda x: (str(id_to_name.get(x, x)).lower(), x))
@@ -1073,12 +941,6 @@ def run_detector_health(
     checks = {
         "noisy": _chk("noisy", noisy_rows[:200]),
         "nonFiring": _chk("nonFiring", non_firing_rows[:200]),
-        "inactiveMts": _chk(
-            "inactiveMts",
-            inactive_mts_rows[:200],
-            inactiveMtsSamplingEnabled=cfg.inactive_mts_enabled,
-            apiErrorSamples=inactive_mts_api_samples,
-        ),
         "redundant": _chk("redundant", redundant_rows[:200]),
         "inactiveDestinations": _chk("inactiveDestinations", dest_rows[:500]),
         "muted": _chk("muted", muted_rows[:200]),
@@ -1090,18 +952,10 @@ def run_detector_health(
         "detectorListTotal": len(det_rows),
         "detectorsAnalyzed": len(ids_in_order),
         "maxDetectorsCap": cfg.max_detectors,
-        "inactiveMtsConfig": {
-            "enabled": cfg.inactive_mts_enabled,
-            "staleHours": cfg.inactive_mts_stale_hours,
-            "maxMetricsFromProgram": cfg.inactive_mts_max_metrics,
-            "perMetricSearchLimit": cfg.inactive_mts_search_limit,
-            "maxMtsEvaluationsPerDetector": cfg.inactive_mts_max_evaluations,
-        },
         "windows": {
             "nowMs": now_ms,
             "last7dMs": win7,
             "last30dMs": win30,
-            "inactiveMtsStaleMs": stale_mts_ms,
         },
         "integrationListError": integ_err,
         "mutingRulesError": muting_err,
@@ -1115,7 +969,6 @@ def _detectors_placeholder_markdown() -> str:
     layout: list[tuple[str, str, str, str]] = [
         ("noisy", "| Color | Detector Name | Number of Triggers (7 Days) |", "| --- | --- | --- |", "|  |  |  |"),
         ("nonFiring", "| Color | Detector Name | Number of Triggers (30 Days) |", "| --- | --- | --- |", "|  |  |  |"),
-        ("inactiveMts", "| Color | Detector Name | Inactive Signal |", "| --- | --- | --- |", "|  |  |  |"),
         ("redundant", "| Color | Detector Name | Redundant Detector IDs |", "| --- | --- | --- |", "|  |  |  |"),
         (
             "inactiveDestinations",
@@ -1183,22 +1036,6 @@ def render_detectors_checks_markdown(report: dict[str, Any] | None) -> str:
         nf_lines.append("|  |  |  |")
     parts.extend(_detector_subsection_markdown("nonFiring", nf, nf_lines))
 
-    # Inactive MTS
-    im = chk.get("inactiveMts") or {}
-    imrows = im.get("rows") or []
-    im_lines = [
-        "| Color | Detector Name | Inactive Signal |",
-        "| --- | --- | --- |",
-    ]
-    for r in imrows:
-        im_lines.append(
-            f"| {_md_cell(str(r.get('color')))} | {_md_detector_name_cell(r, realm)} | "
-            f"{_md_cell(str(r.get('inactiveSignal')))} |"
-        )
-    if not imrows:
-        im_lines.append("|  |  |  |")
-    parts.extend(_detector_subsection_markdown("inactiveMts", im, im_lines))
-
     # Redundant
     red = chk.get("redundant") or {}
     rrows = red.get("rows") or []
@@ -1261,35 +1098,30 @@ def main() -> int:
     p.add_argument("--max-detectors", type=int, default=400, help="Max detectors to analyze (default 400).")
     p.add_argument("--noisy-red", type=int, default=100, help="7d event count >= this → Red noisy.")
     p.add_argument("--noisy-yellow", type=int, default=25, help="7d event count >= this → Yellow noisy.")
-    p.add_argument("--sleep", type=float, default=0.05, help="Seconds between per-detector API bursts.")
+    p.add_argument("--sleep", type=float, default=0.05, help="Seconds each worker sleeps between its API bursts.")
     p.add_argument(
-        "--skip-inactive-mts",
-        action="store_true",
-        help="Do not call /v2/metrictimeseries for inactive-MTS sampling (faster).",
+        "--concurrency",
+        type=int,
+        default=10,
+        help="Number of detectors processed in parallel via a thread pool (default 10).",
     )
     p.add_argument(
-        "--inactive-mts-hours",
-        type=float,
-        default=36.0,
-        help="Age above which MTS lastUpdated is treated as stale (default 36).",
-    )
-    p.add_argument(
-        "--inactive-mts-max-metrics",
+        "--mts-max-metrics",
         type=int,
         default=3,
-        help="Max data('metric') names to parse per detector (default 3).",
+        help="Max data('metric') names to parse per detector for redundant-detector MTS sampling (default 3).",
     )
     p.add_argument(
-        "--inactive-mts-search-limit",
+        "--mts-search-limit",
         type=int,
         default=3,
         help="Max MTS rows per metric search (default 3).",
     )
     p.add_argument(
-        "--inactive-mts-max-evaluations",
+        "--mts-max-samples",
         type=int,
         default=6,
-        help="Max MTS lastUpdated checks per detector across all metrics (default 6).",
+        help="Max MTS ids sampled per detector across all metrics (default 6).",
     )
     p.add_argument("--structured-json-out", metavar="PATH", required=False)
     p.add_argument("--md-out", metavar="PATH", required=False)
@@ -1322,10 +1154,10 @@ def main() -> int:
     ).strip()
 
     logger.info(
-        "Realm: %s | max_detectors: %s | inactive MTS sampling: %s",
+        "Realm: %s | max_detectors: %s | concurrency: %s",
         realm,
         max(1, min(args.max_detectors, 5000)),
-        "off" if args.skip_inactive_mts else "on",
+        max(1, args.concurrency),
     )
 
     ny = max(1, args.noisy_yellow)
@@ -1338,11 +1170,10 @@ def main() -> int:
         noisy_7d_red=nr,
         noisy_7d_yellow=ny,
         sleep_s=max(0.0, args.sleep),
-        inactive_mts_enabled=not args.skip_inactive_mts,
-        inactive_mts_stale_hours=max(1.0, float(args.inactive_mts_hours)),
-        inactive_mts_max_metrics=max(1, min(args.inactive_mts_max_metrics, 20)),
-        inactive_mts_search_limit=max(1, min(args.inactive_mts_search_limit, 50)),
-        inactive_mts_max_evaluations=max(1, min(args.inactive_mts_max_evaluations, 50)),
+        concurrency=max(1, args.concurrency),
+        mts_max_metrics=max(1, min(args.mts_max_metrics, 20)),
+        mts_search_limit=max(1, min(args.mts_search_limit, 50)),
+        mts_max_samples=max(1, min(args.mts_max_samples, 50)),
     )
 
     report = run_detector_health(token, cfg)
